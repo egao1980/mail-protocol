@@ -1,0 +1,76 @@
+(in-package #:mail-backend-smtp)
+
+(defun %crlf (out)
+  (write-char #\Return out)
+  (write-char #\Newline out))
+
+(defun %write-line (out line)
+  (write-string line out)
+  (%crlf out)
+  (finish-output out))
+
+(defun %read-reply (in)
+  "Read one SMTP reply. → (values code text)."
+  (let ((first (read-line in nil nil)))
+    (unless first
+      (error 'mail-send-error :message "SMTP connection closed"))
+    (when (and (plusp (length first)) (char= (char first (1- (length first))) #\Return))
+      (setf first (subseq first 0 (1- (length first)))))
+    (when (< (length first) 3)
+      (error 'mail-send-error :message (format nil "short SMTP reply: ~S" first)))
+    (let* ((code (parse-integer first :start 0 :end 3))
+           (cont (and (> (length first) 3) (char= (char first 3) #\-)))
+           (text (if (> (length first) 4) (subseq first 4) "")))
+      (when cont
+        (loop for line = (read-line in nil nil)
+              while line
+              do (when (and (plusp (length line))
+                            (char= (char line (1- (length line))) #\Return))
+                   (setf line (subseq line 0 (1- (length line)))))
+                 (when (and (>= (length line) 4) (char= (char line 3) #\Space))
+                   (return))))
+      (values code text))))
+
+(defun %expect (in expected)
+  (multiple-value-bind (code text) (%read-reply in)
+    (unless (= code expected)
+      (error 'mail-send-error
+             :message (format nil "SMTP wanted ~A got ~A ~A" expected code text)))
+    (values code text)))
+
+(defun dot-stuff (body)
+  "RFC 5321 DATA payload: CRLF, dot-stuff, terminate with <CRLF>.<CRLF>."
+  (with-output-to-string (out)
+    (with-input-from-string (in body)
+      (loop for line = (read-line in nil nil)
+            while line
+            do (when (and (plusp (length line))
+                          (char= (char line (1- (length line))) #\Return))
+                 (setf line (subseq line 0 (1- (length line)))))
+               (when (and (plusp (length line)) (char= (char line 0) #\.))
+                 (write-char #\. out))
+               (write-string line out)
+               (%crlf out)))
+    (write-char #\. out)
+    (%crlf out)))
+
+(defun smtp-dialogue (in out &key from recipients data (ehlo-host "localhost"))
+  "Drive a minimal SMTP transaction on character streams. No AUTH/STARTTLS."
+  (unless (and from recipients data)
+    (error 'mail-send-error :message "smtp-dialogue needs :from :recipients :data"))
+  (%expect in 220)
+  (%write-line out (format nil "EHLO ~A" ehlo-host))
+  (%expect in 250)
+  (%write-line out (format nil "MAIL FROM:<~A>" from))
+  (%expect in 250)
+  (dolist (rcpt recipients)
+    (%write-line out (format nil "RCPT TO:<~A>" rcpt))
+    (%expect in 250))
+  (%write-line out "DATA")
+  (%expect in 354)
+  (write-string (dot-stuff data) out)
+  (finish-output out)
+  (%expect in 250)
+  (%write-line out "QUIT")
+  (%expect in 221)
+  t)
