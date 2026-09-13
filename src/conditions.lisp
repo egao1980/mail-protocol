@@ -8,5 +8,16 @@
 (define-condition mail-parse-error (mail-error) ())
 (define-condition mail-send-error (mail-error) ())
 
+(define-condition imap-error (mail-error)
+  ((tag :initarg :tag :reader imap-error-tag :initform nil)
+   (status :initarg :status :reader imap-error-status :initform nil))
+  (:report (lambda (c s)
+             (format s "IMAP error~@[ [~a]~]~@[ ~a~]~@[: ~a~]"
+                     (imap-error-tag c)
+                     (imap-error-status c)
+                     (mail-error-message c)))))
+
+(define-condition imap-auth-error (imap-error) ())
+
 (defclass mail-backend () ()
   (:documentation "Base class for mail-protocol send backends."))
