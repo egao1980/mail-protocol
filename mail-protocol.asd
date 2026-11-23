@@ -15,14 +15,16 @@
   :in-order-to ((test-op (test-op "mail-protocol/tests"))))
 
 (defsystem "mail-protocol/tests"
-  :depends-on ("mail-protocol" "mail-backend-memory" "mail-backend-smtp" "rove")
+  :depends-on ("mail-protocol" "mail-backend-memory" "mail-backend-smtp" "rove"
+               "usocket" "cl-stack-ssl")
   :pathname "tests"
   :serial t
   :components ((:file "package")
                (:file "message-test")
                (:file "send-test")
                (:file "smtp-test")
-               (:file "imap-test"))
+               (:file "imap-test")
+               (:file "compose-send-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
