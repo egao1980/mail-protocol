@@ -16,10 +16,10 @@ Bcc is envelope-only (stripped from `print-message`).
 (asdf:load-system "mail-backend-memory")
 
 (let ((msg (stack-mail:make-message
-            :from "Alice <alice@ex.com>" :to "b@ex.com"
+            :from "alice@ex.com" :to "b@ex.com"
             :subject "Report" :body "See the attached report.")))
   (stack-mail:add-alternative msg "<p>See the attached <b>report</b>.</p>")    ; add_alternative
-  (stack-mail:add-attachment msg (alexandria:read-file-into-byte-vector "r.pdf"); add_attachment
+  (stack-mail:add-attachment msg (alexandria:read-file-into-byte-vector "r.pdf") ; add_attachment
                              :filename "r.pdf")                              ; → application/pdf
   (stack-mail:send msg)
   (stack-mail:print-message msg))
