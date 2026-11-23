@@ -39,13 +39,11 @@ authenticate (AUTH PLAIN, else LOGIN). TLS-VERIFY is cl+ssl's :VERIFY."
 
 (defmacro %with-transport-errors ((backend) &body body)
   "Run BODY; a socket, stream or TLS failure becomes MAIL-SEND-ERROR with
-the original condition as its CAUSE."
+the original condition as its CAUSE (the report prints it)."
   `(handler-case (progn ,@body)
      ;; cl+ssl exports no base condition; CL+SSL-ERROR is its root.
      ((or usocket:socket-error usocket:ns-error stream-error cl+ssl::cl+ssl-error) (e)
-       (error 'mail-send-error
-              :message (format nil "~A: ~A" (%endpoint ,backend) e)
-              :cause e))))
+       (error 'mail-send-error :message (%endpoint ,backend) :cause e))))
 
 (defun %text-stream (binary)
   "SMTP lines over BINARY: UTF-8, and #\\Newline is a bare LF (the
