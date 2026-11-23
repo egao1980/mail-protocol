@@ -5,8 +5,8 @@ Email **compose / parse / send / IMAP** for [cl-stack](https://github.com/egao19
 | System | Role | OCI |
 |--------|------|-----|
 | `mail-protocol` (`stack-mail`) | `make-message` / `add-alternative` / `add-attachment` / `parse-message` / `send` / IMAP | **0.3.0** |
-| `mail-backend-memory` | Default in tests — records sent messages | **0.1.0** |
-| `mail-backend-smtp` | SMTP: AUTH PLAIN / LOGIN, STARTTLS, implicit TLS (cl-stack-ssl) | **0.2.0** |
+| `mail-backend-memory` | Default in tests — records sent messages | **0.3.0** |
+| `mail-backend-smtp` | SMTP: AUTH PLAIN / LOGIN, STARTTLS, implicit TLS (cl-stack-ssl) | **0.3.0** |
 
 Bcc is envelope-only (stripped from `print-message`).
 

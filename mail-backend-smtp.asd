@@ -1,5 +1,5 @@
 (defsystem "mail-backend-smtp"
-  :version "0.2.0"
+  :version "0.3.0"
   :description "mail-protocol backend — SMTP over usocket, AUTH PLAIN/LOGIN, STARTTLS and implicit TLS through cl-stack-ssl (smtplib-shaped)"
   :author "egao1980"
   :license "MIT"
