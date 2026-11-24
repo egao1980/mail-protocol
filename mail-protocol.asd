@@ -26,7 +26,7 @@
                (:file "imap-test")
                (:file "compose-send-test")
                (:file "compose-unit-test")
-               (:file "utf8-wire-test"))
+               (:file "message-id-threads-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
