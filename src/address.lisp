@@ -322,32 +322,106 @@ folding can fit on a line?"
                         (progn (setf run 0) nil)
                         (> (incf run) 76)))))
 
+(defun %address-comments (address)
+  "The comments of ADDRESS outside quoted strings and domain literals, each
+as written between its outer parentheses, in order."
+  (let ((comments '())
+        (quoted nil)
+        (literal nil)
+        (escaped nil)
+        (depth 0)
+        (start 0))
+    (dotimes (i (length address))
+      (let ((c (char address i)))
+        (cond
+          (escaped (setf escaped nil))
+          ((and (or quoted literal (plusp depth)) (char= c #\\)) (setf escaped t))
+          (quoted (when (char= c #\") (setf quoted nil)))
+          (literal (when (char= c #\]) (setf literal nil)))
+          ((plusp depth)
+           (case c
+             (#\( (incf depth))
+             (#\) (decf depth)
+              (when (zerop depth)
+                (push (subseq address (1+ start) i) comments)))))
+          ((char= c #\") (setf quoted t))
+          ((char= c #\[) (setf literal t))
+          ((char= c #\() (setf depth 1 start i)))))
+    (nreverse comments)))
+
+(defun %needs-encoded-words-p (text)
+  (or (not (%ascii-p text)) (%long-word-p text)))
+
+(defun %wire-phrase (name)
+  "Display name NAME for the wire: encoded-words when it needs them, else
+a phrase (quoted where it needs it)."
+  (if (%needs-encoded-words-p name)
+      (mime-protocol:encode-encoded-words name)
+      (%display-phrase name)))
+
+(defun %wire-mailbox (address)
+  "Mailbox ADDRESS for the wire: display-name <addr-spec> (comments), or
+addr-spec (comments) without a display name, the display name and comments
+as encoded-words where they need them (RFC 2047 5 (2), (3)). ADDRESS comes
+back as written when neither does."
+  (multiple-value-bind (spec name) (%parse-mailbox address)
+    (let ((comments (%address-comments address)))
+      (if (and (or (null name) (not (%needs-encoded-words-p name)))
+               (notany #'%needs-encoded-words-p comments))
+          address
+          (format nil "~:[~*~A~;~A <~A>~]~{ (~A)~}"
+                  (and name (plusp (length name)))
+                  (and name (plusp (length name)) (%wire-phrase name))
+                  spec
+                  (mapcar (lambda (comment)
+                            (if (%needs-encoded-words-p comment)
+                                (mime-protocol:encode-encoded-words comment)
+                                comment))
+                          comments))))))
+
+(defun %wire-group (address colon semicolon)
+  "Group ADDRESS (its \":\" at COLON, \";\" at SEMICOLON) for the wire: the
+group's display name and each member as %WIRE-ADDRESS writes them."
+  (let ((name (%phrase-text (%address-tokens (subseq address 0 colon)) address))
+        (members (%split-address-list (subseq address (1+ colon) (or semicolon (length address))))))
+    (if (null name)
+        address
+        (format nil "~A: ~{~A~^, ~};" (%wire-phrase name) (mapcar #'%wire-address members)))))
+
 (defun %wire-address (address)
-  "ADDRESS for a header field: a mailbox's display name becomes RFC 2047
-encoded-words (RFC 2047 5 (3)) when it is not ASCII or holds a word too long
-to fold, as Python's EmailMessage writes it. Anything else, a group or an
-address that does not parse included, is kept as written."
+  "ADDRESS for a header field, as Python's EmailMessage writes it: a display
+name (of a mailbox or a group) or a comment that is not ASCII, or holds a
+word too long to fold, becomes RFC 2047 encoded-words (RFC 2047 5 (2),
+(3)); a group's members are written the same way. An ASCII address, and
+one that does not parse, is kept as written."
   (if (and (%ascii-p address) (not (%long-word-p address)))
       address
       (handler-case
-          (if (%group-bounds address)
-              address
-              (multiple-value-bind (spec name) (%parse-mailbox address)
-                (if (and name (or (not (%ascii-p name)) (%long-word-p name)))
-                    (format nil "~A <~A>" (mime-protocol:encode-encoded-words name) spec)
-                    address)))
+          (multiple-value-bind (colon semicolon) (%group-bounds address)
+            (if colon
+                (%wire-group address colon semicolon)
+                (%wire-mailbox address)))
         (mail-address-error () address))))
 
 (defun %display-address (address)
-  "ADDRESS for a reader: encoded-words in a mailbox's display name decoded,
-the name quoted again where it needs it. Anything else as written."
+  "ADDRESS for a reader: encoded-words in a mailbox's or a group's display
+name decoded (a group's members too), each name quoted again where it needs
+it. Anything else as written."
   (if (not (search "=?" address))
       address
       (handler-case
-          (if (%group-bounds address)
-              address
-              (multiple-value-bind (spec name) (%parse-mailbox address)
-                (if name
-                    (format nil "~A <~A>" (%display-phrase name) spec)
-                    address)))
+          (multiple-value-bind (colon semicolon) (%group-bounds address)
+            (if colon
+                (let ((name (%phrase-text (%address-tokens (subseq address 0 colon)) address)))
+                  (if (null name)
+                      address
+                      (format nil "~A: ~{~A~^, ~};"
+                              (%display-phrase name)
+                              (mapcar #'%display-address
+                                      (%split-address-list
+                                       (subseq address (1+ colon) (or semicolon (length address))))))))
+                (multiple-value-bind (spec name) (%parse-mailbox address)
+                  (if name
+                      (format nil "~A <~A>" (%display-phrase name) spec)
+                      address))))
         (mail-address-error () address))))

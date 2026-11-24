@@ -103,10 +103,12 @@
   (ok (equal addresses (address-list value)) (format nil "~S → ~S" value (address-list value))))
 
 (deftest envelope-expands-groups-and-strips-names
+  ;; a@EXAMPLE.com is a@example.com: the domain is case-insensitive, the
+  ;; local part is not (RFC 5321 2.4; see envelope-keeps-local-parts-that-differ-in-case).
   (let ((m (make-message :from "\"Ann A.\" <ann@example.com>"
                          :to "Team: a@example.com, \"B, b\" <b@example.com>;"
                          :cc "undisclosed-recipients:;"
-                         :bcc "Carol <c@example.com>, A@example.com"
+                         :bcc "Carol <c@example.com>, a@EXAMPLE.com"
                          :body "x")))
     (ok (equal '("a@example.com" "b@example.com" "c@example.com") (envelope-recipients m))
         (format nil "~S" (envelope-recipients m)))
