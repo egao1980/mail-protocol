@@ -42,18 +42,36 @@ else signal CONDITION with the code and text. → (values code text lines)."
     (values code text lines)))
 
 (defun dot-stuff (body)
-  "RFC 5321 DATA payload: CRLF, dot-stuff, terminate with <CRLF>.<CRLF>."
+  "RFC 5321 DATA payload, as Python's smtplib sends it: every line end, CRLF,
+a bare LF or a bare CR (smtplib's _fix_eols), becomes CRLF; a line that
+starts with \".\" gets another one; <CRLF>.<CRLF> ends the data. A bare CR
+never reaches the wire (RFC 5321 2.3.8), so a body holding <CR>.<CR> cannot
+end the message early on a server that takes CR as a line end (SMTP
+smuggling)."
   (with-output-to-string (out)
-    (with-input-from-string (in body)
-      (loop for line = (read-line in nil nil)
-            while line
-            do (when (and (plusp (length line))
-                          (char= (char line (1- (length line))) #\Return))
-                 (setf line (subseq line 0 (1- (length line)))))
-               (when (and (plusp (length line)) (char= (char line 0) #\.))
+    (let ((len (length body))
+          (start 0)
+          (i 0))
+      (flet ((line (end)
+               (when (and (< start end) (char= (char body start) #\.))
                  (write-char #\. out))
-               (write-string line out)
+               (write-string body out :start start :end end)
                (%crlf out)))
+        (loop while (< i len)
+              do (case (char body i)
+                   (#\Return
+                    (line i)
+                    (setf i (if (and (< (1+ i) len) (char= (char body (1+ i)) #\Newline))
+                                (+ i 2)
+                                (1+ i))
+                          start i))
+                   (#\Newline
+                    (line i)
+                    (setf i (1+ i)
+                          start i))
+                   (t (incf i))))
+        (when (< start len)
+          (line len))))
     (write-char #\. out)
     (%crlf out)))
 

@@ -128,7 +128,19 @@ attachment (Python EmailMessage.get_body), else \"\"."
 (defvar *message-id-nonce* nil
   "64 random bits drawn from the OS on first use in each process; they keep
 two processes (or two runs of one saved image) apart. A saved image starts
-with NIL again.")
+with NIL again, and a forked child draws its own (see *MESSAGE-ID-PID*).")
+
+(defvar *message-id-pid* nil
+  "The process id *MESSAGE-ID-NONCE* was drawn in. A process forked after
+its first Message-ID (a pre-fork server, a job runner that forks per task)
+inherits the nonce and the counter; it sees another pid and draws its own.")
+
+(defun %current-pid ()
+  "This process's id, or NIL where the implementation cannot tell."
+  #+sbcl
+  (let ((getpid (find-symbol "UNIX-GETPID" "SB-UNIX")))
+    (and getpid (fboundp getpid) (funcall getpid)))
+  #-sbcl nil)
 
 (defvar *message-id-counter* 0
   "IDs made so far in this process; each Message-ID takes the next value.")
@@ -138,12 +150,16 @@ with NIL again.")
 senders on several threads must never get the same pair.")
 
 (defun %next-message-id-parts ()
-  "→ (values sequence nonce), a pair no other call in this process returns."
+  "→ (values sequence pid nonce), a triple no other call returns. On first
+use, after an image restore, and in a forked child (the pid changed) the
+nonce is drawn again and the sequence starts over."
   (bt2:with-lock-held (*message-id-lock*)
-    (values (incf *message-id-counter*)
-            (or *message-id-nonce*
-                (setf *message-id-nonce*
-                      (random (expt 2 64) (make-random-state t)))))))
+    (let ((pid (%current-pid)))
+      (unless (and *message-id-nonce* (eql pid *message-id-pid*))
+        (setf *message-id-nonce* (random (expt 2 64) (make-random-state t))
+              *message-id-pid* pid
+              *message-id-counter* 0))
+      (values (incf *message-id-counter*) pid *message-id-nonce*))))
 
 (uiop:register-image-restore-hook
  (lambda () (setf *message-id-nonce* nil))
@@ -162,15 +178,17 @@ senders on several threads must never get the same pair.")
       (and domain (plusp (length domain)) domain))))
 
 (defun make-message-id (&key domain)
-  "A new Message-ID \"<time.sequence.nonce@DOMAIN>\", in base 36 (Python
-email.utils.make_msgid has time, pid and a random number). SEQUENCE counts
-the IDs of this process under a lock, so no two calls, on any thread,
-return the same ID; NONCE is 64 random bits per process, which keeps
-processes apart (RFC 5322 3.6.4: globally unique). DOMAIN defaults to
-\"localhost\"; MAKE-MESSAGE passes the From address's domain."
-  (multiple-value-bind (sequence nonce) (%next-message-id-parts)
-    (format nil "<~(~36R.~36R.~36R~)@~A>"
-            (get-universal-time) sequence nonce (or domain "localhost"))))
+  "A new Message-ID \"<time.sequence.pid.nonce@DOMAIN>\", in base 36, like
+Python's email.utils.make_msgid (time, pid and a random number). SEQUENCE
+counts the IDs of this process under a lock, so no two calls, on any
+thread, return the same ID; PID and NONCE (64 random bits, drawn again in a
+forked child or a restored image) keep processes apart (RFC 5322 3.6.4:
+globally unique). PID is left out where the implementation cannot tell it.
+DOMAIN defaults to \"localhost\"; MAKE-MESSAGE passes the From address's
+domain."
+  (multiple-value-bind (sequence pid nonce) (%next-message-id-parts)
+    (format nil "<~(~36R.~36R.~@[~36R.~]~36R~)@~A>"
+            (get-universal-time) sequence pid nonce (or domain "localhost"))))
 
 (defun make-message (&key from to cc bcc subject (body "") (subtype "plain")
                           (date t) (message-id t))
