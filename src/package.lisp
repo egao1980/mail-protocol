@@ -4,6 +4,9 @@
   (:export            #:mail-error
            #:mail-parse-error
            #:mail-send-error
+           #:mail-send-error-code
+           #:mail-send-error-cause
+           #:mail-auth-error
            #:mail-error-message
            #:imap-error
            #:imap-auth-error
@@ -24,6 +27,13 @@
            #:message-bcc
            #:message-subject
            #:message-body
+           #:message-date
+           #:message-id
+           #:message-attachments
+           #:add-alternative
+           #:add-attachment
+           #:make-message-id
+           #:format-message-date
            #:make-message
            #:parse-message
            #:print-message
@@ -49,6 +59,11 @@
            #:encode-imap-command
            #:parse-imap-response
            #:parse-imap-untagged
-           #:next-imap-tag))
+           #:next-imap-tag
+           #:mail-address-error
+           #:mail-address-error-address
+           #:parse-address
+           #:address-mailboxes
+           #:envelope-sender))
 
 (in-package #:mail-protocol)

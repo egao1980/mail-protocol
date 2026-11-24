@@ -15,7 +15,7 @@
     (ok (string= "Hi" (message-subject msg)))
     (ok (string= "hello" (message-body msg)))
     (ok (search "hello" wire))
-    (ok (search "subject: Hi" wire))
+    (ok (search "Subject: Hi" wire))
     (ng (search "secret@ex.com" wire))
     (ok (equal '("b@ex.com" "c@ex.com" "d@ex.com" "secret@ex.com")
                (envelope-recipients msg)))))
