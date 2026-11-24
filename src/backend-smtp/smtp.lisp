@@ -170,13 +170,21 @@ signals MAIL-SEND-ERROR / MAIL-AUTH-ERROR rather than sending in the clear.
 FROM and each of RECIPIENTS go into MAIL FROM / RCPT TO as their addr-spec
 (PARSE-ADDRESS: \"Ann <ann@ex.com>\" → <ann@ex.com>); one that does not
 parse, or holds CR or LF, signals MAIL-ADDRESS-ERROR before anything is
-sent. DATA is PRINT-MESSAGE's string (one character per octet) or octets.
-MAIL FROM gets BODY=8BITMIME when DATA has 8-bit octets and the server
-offers it, and SMTPUTF8 when an address is not ASCII (a server without
-SMTPUTF8 then signals MAIL-SEND-ERROR). → T."
+sent. FROM \"\" or \"<>\" is the null reverse-path, MAIL FROM:<> (RFC 5321
+4.5.5: bounces, DSNs, auto-replies). DATA is PRINT-MESSAGE's string (one
+character per octet) or octets. MAIL FROM gets BODY=8BITMIME when DATA has
+8-bit octets and the server offers it, and SMTPUTF8 when an address is not
+ASCII (a server without SMTPUTF8 then signals MAIL-SEND-ERROR).
+
+Once the server has taken the message (250 after DATA) the send has
+succeeded: QUIT is sent, but a missing or odd reply to it, or a connection
+that is already gone, is not an error (smtplib ignores it too), so a caller
+never retries a delivered message. → T."
   (unless (and from recipients data)
     (error 'mail-send-error :message "smtp-dialogue needs :from :recipients :data"))
-  (let* ((from (parse-address from))
+  (let* ((from (if (member (string-trim '(#\Space #\Tab) from) '("" "<>") :test #'string=)
+                   ""
+                   (parse-address from)))
          (recipients (mapcar #'parse-address recipients))
          (data (%data-octets data))
          (8bit (find-if (lambda (c) (> (char-code c) 127)) data))
@@ -207,6 +215,8 @@ SMTPUTF8 then signals MAIL-SEND-ERROR). → T."
     (write-string (dot-stuff data) out)
     (finish-output out)
     (%expect in 250 :what "message")
-    (%write-line out "QUIT")
-    (%expect in 221 :what "QUIT")
+    ;; The message is delivered; the end of the session cannot undo that.
+    (handler-case (progn (%write-line out "QUIT")
+                    (%expect in 221 :what "QUIT"))
+      ((or mail-send-error stream-error cl+ssl::cl+ssl-error) () nil))
     t))

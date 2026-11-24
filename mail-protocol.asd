@@ -3,7 +3,7 @@
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "mime-protocol" "0.3.2") "encoding-protocol" "datetime-protocol"
+  :depends-on ((:version "mime-protocol" "0.3.3") "encoding-protocol" "datetime-protocol"
                "bordeaux-threads")
   :properties (:cl-repo (:ci (:with ("mail-backend-memory" "mail-backend-smtp"))))
   :serial t
@@ -33,7 +33,9 @@
                (:file "round3-test")
                (:file "evidence-r3-test")
                (:file "utf8-wire-test")
-               (:file "envelope-header-test"))
+               (:file "envelope-header-test")
+               (:file "adversarial-r4-test")
+               (:file "round4-fixes-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

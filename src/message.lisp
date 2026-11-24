@@ -62,16 +62,32 @@ NIL when ERRORP is NIL."
       (error 'mail-parse-error :message (format nil "unknown charset ~S" charset)))
      (t nil))))
 
-(defun %mail-text-entity (text &rest keys &key (charset "utf-8") &allow-other-keys)
-  "MIME-PROTOCOL:MAKE-TEXT-ENTITY for mail. TEXT is encoded in CHARSET, as
-its Content-Type says (MAKE-TEXT-ENTITY always writes UTF-8). The part is
-8bit, or quoted-printable when the text would not survive 8bit SMTP (a line
-over 998 octets, a NUL), as Python's EmailMessage switches to
-quoted-printable for long lines; a relay would otherwise break the line."
+(defun %check-token (value what)
+  "VALUE, unless it is not an RFC 2045 token: then signal MAIL-PARSE-ERROR
+naming WHAT. A ; or = in a subtype or disposition would add parameters to
+its field (\"attachment; filename=x.exe\")."
+  (unless (and (stringp value)
+               (plusp (length value))
+               (every (lambda (c)
+                        (and (< 32 (char-code c) 127)
+                             (not (find c "()<>@,;:\\\"/[]?="))))
+                      value))
+    (error 'mail-parse-error
+           :message (format nil "~A ~S is not an RFC 2045 token" what value)))
+  value)
+
+(defun %mail-text-entity (text &rest keys &key (subtype "plain") disposition-type
+                               &allow-other-keys)
+  "MIME-PROTOCOL:MAKE-TEXT-ENTITY for mail: TEXT in its charset (an unknown
+one signals MIME-PROTOCOL:MIME-ENCODE-ERROR). SUBTYPE and DISPOSITION-TYPE
+must be tokens (%CHECK-TOKEN). The part is 8bit, or quoted-printable when
+the text would not survive 8bit SMTP (a line over 998 octets, a NUL), as
+Python's EmailMessage switches to quoted-printable for long lines; a relay
+would otherwise break the line."
+  (%check-token subtype "subtype")
+  (when disposition-type
+    (%check-token disposition-type "disposition"))
   (let ((entity (apply #'mime-protocol:make-text-entity text keys)))
-    (when (and charset (not (member charset '("utf-8" "utf8") :test #'string-equal)))
-      (setf (mime-protocol:mime-content entity)
-            (encoding-protocol:encode text :encoding (%charset-encoding charset))))
     (when (%overlong-line-p (mime-protocol:mime-content entity))
       (setf (mime-protocol:mime-transfer-encoding entity) :quoted-printable))
     entity))
@@ -361,9 +377,13 @@ EmailMessage.add_attachment). CONTENT-TYPE defaults from FILENAME's
 extension, else application/octet-stream (text/plain for a string).
 A string is encoded in the Content-Type's charset (default UTF-8); a string
 of a type other than text/* is sent as its UTF-8 octets, keeping the type.
+DISPOSITION must be a token (\"attachment\", \"inline\"); one with \";\" or
+\"=\" signals MAIL-PARSE-ERROR rather than add parameters. A long non-ASCII
+FILENAME goes out as RFC 2231 continuations (mime-protocol).
 The message becomes multipart/mixed: the body first, then attachments in
 the order added; binary parts are base64. → MSG."
   (check-type data (or string (vector (unsigned-byte 8))))
+  (%check-token disposition "disposition")
   (let* ((ct (or content-type
                  (and filename (mime-protocol:lookup-mime filename nil))
                  (if (stringp data) "text/plain" "application/octet-stream")))
@@ -414,24 +434,38 @@ through ISO-8859-1. Header lines are folded at 78 (RFC 5322 2.1.1)."
   (loop for address in addresses
         append (mapcar #'car (address-mailboxes address))))
 
+(defun %mailbox-key (spec)
+  "SPEC with its domain in lowercase: the local part is case-sensitive, the
+domain is not (RFC 5321 2.4)."
+  (let ((at (position #\@ spec :from-end t)))
+    (if at
+        (concatenate 'string (subseq spec 0 at) (string-downcase (subseq spec at)))
+        spec)))
+
 (defun envelope-recipients (msg)
   "The SMTP envelope recipients of MSG: the addr-spec of every To, Cc and
 Bcc mailbox, group members included, each once, as smtplib's send_message
-takes them (\"Bob <bob@ex.com>\" → \"bob@ex.com\"). Signals
-MAIL-ADDRESS-ERROR for an address that does not parse."
+takes them (\"Bob <bob@ex.com>\" → \"bob@ex.com\"). Two addresses are the
+same mailbox when they differ only in the case of the domain: the local part
+is case-sensitive (RFC 5321 2.4). Signals MAIL-ADDRESS-ERROR for an address
+that does not parse."
   (let ((entity (message-entity msg)))
     (delete-duplicates
      (%addr-specs (append (address-list (mime-protocol:header-value entity "to"))
                           (address-list (mime-protocol:header-value entity "cc"))
                           (message-bcc msg)))
-     :test #'string-equal :from-end t)))
+     :test #'string= :key #'%mailbox-key :from-end t)))
 
 (defun envelope-sender (msg)
   "The SMTP envelope sender of MSG (MAIL FROM): the addr-spec of the Sender
-field, else of the first From mailbox, as smtplib's send_message. NIL when
-there is neither. Signals MAIL-ADDRESS-ERROR for an address that does not
-parse."
+field, else of the first From mailbox, as smtplib's send_message. \"\" (the
+null reverse-path, MAIL FROM:<>, RFC 5321 4.5.5) when that field is empty
+or \"<>\". NIL when there is neither field. Signals MAIL-ADDRESS-ERROR for
+an address that does not parse."
   (let* ((entity (message-entity msg))
          (field (or (mime-protocol:header-value entity "sender")
                     (mime-protocol:header-value entity "from"))))
-    (and field (first (%addr-specs (address-list field))))))
+    (cond
+      ((null field) nil)
+      ((member (string-trim '(#\Space #\Tab) field) '("" "<>") :test #'string=) "")
+      (t (first (%addr-specs (address-list field)))))))
