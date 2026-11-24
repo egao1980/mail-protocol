@@ -26,7 +26,11 @@ Bcc is envelope-only (stripped from `print-message`).
 ```
 
 - `make-message` writes `Date` (RFC 5322, UTC: `Mon, 23 Nov 2026 21:04:05 +0000`) and `Message-ID` (`<time.sequence.pid.nonce@domain-of-From>`: a per-process counter taken under a lock, so IDs never repeat across threads, the process id and 64 random bits per process, drawn again in a forked child or a restored image). `:date` takes `t` (now, from datetime-protocol's clock), a string, an `instant` or `nil`; `:message-id` takes `t`, a string or `nil`. `format-message-date` / `make-message-id` are `email.utils.formatdate` / `make_msgid`.
-- Header names print in canonical case (`From`, `Subject`, `MIME-Version`, `Message-ID`).
+- Header names print in canonical case (`From`, `Subject`, `MIME-Version`, `Message-ID`). Header lines fold at 78 (RFC 5322 §2.1.1).
+- Addresses (`:from` `:to` `:cc` `:bcc`, a string or a list) are RFC 5322 address lists: `address-list` cuts them at the commas between addresses, not inside `"Doe, John" <john@ex.com>`, a comment or a group (`Team: a@ex.com, b@ex.com;`). `parse-address` gives the addr-spec and display name of a mailbox (`"Ann <ann@ex.com>"` → `"ann@ex.com"` `"Ann"`), `address-mailboxes` the members of a group, as `email.utils.getaddresses`.
+- Non-ASCII goes out as Python's `EmailMessage` sends it: the Subject's non-ASCII words and a non-ASCII (or unfoldable) display name as RFC 2047 encoded-words (`=?utf-8?b?...?=`); `message-subject`, `message-from`, `message-to` and `message-cc` decode them again. The body is 8bit text in its charset (`add-alternative … :charset`, a `text/*; charset=` attachment), or quoted-printable when a line is longer than the 998 octets SMTP carries. A string attachment of another type (`application/json`) keeps that type.
+- CR, LF or NUL in an address signals `mail-address-error` (a `mail-parse-error`, restart `use-value`); in the Subject or another header, mime-protocol's `mime-header-error`. A line break would add header fields or SMTP commands (Python: `ValueError`).
+- `print-message` returns octets, one character per octet (mime-protocol's `print-mime`): write it to the wire through ISO-8859-1.
 - `add-alternative content &key (subtype "html") charset` makes the body `multipart/alternative`. `add-attachment data &key content-type filename disposition` makes the message `multipart/mixed` (body first). Octets are base64; a string is a text attachment. The content type defaults from the filename. Either order nests as `mixed(alternative(text, html), attachments…)`.
 - Reading: `message-body` (`:subtype "html"` for the HTML part), `message-attachments`, `message-date`, `message-id`.
 
@@ -53,7 +57,11 @@ Bcc is envelope-only (stripped from `print-message`).
 | `:tls-verify` | `:required` | cl+ssl's `:verify`; SNI + hostname check, OS trust store from cl-stack-ssl |
 | `:ehlo-host` `:connect-timeout` | `"localhost"` `30` | |
 
-Conditions: `mail-send-error` (`code` = SMTP reply code, `cause` = usocket / stream / cl+ssl condition, e.g. a refused connection) and its subclass `mail-auth-error` (535, or no common AUTH mechanism). `smtp-dialogue` drives the protocol on any pair of character streams (tests script it). The DATA payload is sent as smtplib sends it: every line end (CRLF, a bare LF or a bare CR) becomes CRLF before dot-stuffing, so a bare CR never reaches the wire and a body holding `<CR>.<CR>` cannot end the message early (SMTP smuggling, #7).
+The envelope is what smtplib's `send_message` uses: `envelope-sender` is the addr-spec of `Sender`, else of the first `From` mailbox, and `envelope-recipients` the addr-specs of every `To`, `Cc` and `Bcc` mailbox, group members included. `From: Ann <ann@ex.com>` goes out as `MAIL FROM:<ann@ex.com>` (#4). Both are worked out before connecting, so a bad address sends nothing.
+
+No SMTP command carries CR or LF: an address that holds one is refused when the message is made, `smtp-dialogue` reduces every path argument to its addr-spec, and any command line with CR or LF is refused with `mail-send-error` before it is written, as smtplib's `putcmd` does (#8). AUTH PLAIN refuses a NUL in the credentials. `MAIL FROM` gets `BODY=8BITMIME` when the data has 8-bit octets and the server offers it, and `SMTPUTF8` for a non-ASCII envelope address (a server without SMTPUTF8 is an error).
+
+Conditions: `mail-send-error` (`code` = SMTP reply code, `cause` = usocket / stream / cl+ssl condition, e.g. a refused connection) and its subclass `mail-auth-error` (535, or no common AUTH mechanism). `smtp-dialogue` drives the protocol on any pair of character streams, one character per octet (tests script it); the backend's streams are ISO-8859-1, so `print-message`'s octets reach the wire as they are (#5). The DATA payload is sent as smtplib sends it: every line end (CRLF, a bare LF or a bare CR) becomes CRLF before dot-stuffing, so a bare CR never reaches the wire and a body holding `<CR>.<CR>` cannot end the message early (SMTP smuggling, #7).
 
 ## IMAP
 
@@ -71,9 +79,7 @@ IMAP (`imap-client`): `imap-connect` `imap-login` `imap-select` `imap-fetch` `im
 
 ## Tests
 
-`cl-repo test --system mail-protocol`. The SMTP tests in `tests/compose-send-test.lisp` run against Mailpit (AUTH on 11026, STARTTLS on 11027, implicit TLS on 11028, a test CA in `MAIL_SMTP_TEST_CA`) and skip without it; the file header has the `docker run` lines. Everything else needs no server.
-
-Not yet: RFC 5322 address parsing for the envelope (#4) and RFC 2047 / 8-bit bodies over SMTP (#5).
+`cl-repo test --system mail-protocol`. The SMTP tests in `tests/compose-send-test.lisp` run against Mailpit (AUTH on 11026, STARTTLS on 11027, implicit TLS on 11028, a test CA in `MAIL_SMTP_TEST_CA`) and skip without it; the file header has the `docker run` lines. `live-display-name-send` and `live-non-ascii-send` use a plain Mailpit (`MAIL_SMTP_TEST_PLAIN_PORT`, default 11025). Everything else needs no server: capture servers on an ephemeral port record the wire.
 
 ## License
 

@@ -1,24 +1,23 @@
 (in-package #:mail-protocol)
 
-(defun %split-commas (s)
-  (loop for start = 0 then (1+ pos)
-        for pos = (position #\, s :start start)
-        for tok = (string-trim '(#\Space #\Tab) (subseq s start (or pos (length s))))
-        unless (zerop (length tok))
-          collect tok
-        while pos))
-
 (defun address-list (value)
-  "Normalize VALUE to a list of address strings."
+  "VALUE, an RFC 5322 address-list string or a list of them, as a list of
+address strings. The list is cut at the commas between addresses, not at
+one inside a quoted display name (\"Doe, John\" <john@ex.com>), a comment,
+angle brackets or a group. Signals MAIL-ADDRESS-ERROR when VALUE holds CR,
+LF or NUL."
   (cond
-    ((null value) nil)
-    ((stringp value) (%split-commas value))
-    ((and (consp value) (every #'stringp value)) (copy-list value))
-    (t (error 'mail-parse-error
-              :message (format nil "not an address list: ~S" value)))))
+   ((null value) nil)
+   ((stringp value) (%split-address-list (%refuse-line-breaks value)))
+   ((and (consp value) (every #'stringp value))
+    (loop for v in value
+          append (%split-address-list (%refuse-line-breaks v))))
+   (t (error 'mail-parse-error
+             :message (format nil "not an address list: ~S" value)))))
 
 (defun %join-addresses (addrs)
-  (format nil "~{~A~^, ~}" addrs))
+  "ADDRS as one header field value, each in its wire form (%WIRE-ADDRESS)."
+  (format nil "~{~A~^, ~}" (mapcar #'%wire-address addrs)))
 
 (defclass message ()
   ((entity :initarg :entity :accessor message-entity)
@@ -27,15 +26,73 @@
 (defun message-p (object)
   (typep object 'message))
 
+(defun %wire-subject (subject)
+  "SUBJECT (NIL is \"\") for the Subject field: non-ASCII words as RFC 2047
+encoded-words, as Python's EmailMessage sends it. CR, LF or NUL signal
+MIME-PROTOCOL:MIME-HEADER-ERROR (restart USE-VALUE): a line break would
+add header fields (Python: ValueError)."
+  (mime-protocol:encode-header-text (or subject "") :name "Subject"))
+
+(defun %overlong-line-p (octets)
+  "Does OCTETS hold a line longer than the 998 octets SMTP carries (RFC 5321
+4.5.3.1.6, RFC 5322 2.1.1), or a NUL, which 8bit text may not (RFC 2045 2.8)?"
+  (let ((run 0))
+    (loop for b across octets
+          do (cond
+              ((or (= b 10) (= b 13)) (setf run 0))
+              ((zerop b) (return t))
+              ((> (incf run) 998) (return t))))))
+
+(defun %charset-encoding (charset &optional (errorp t))
+  "The encoding-protocol name of MIME CHARSET (\"iso-8859-1\",
+\"windows-1252\"). When it names none: signal MAIL-PARSE-ERROR, or return
+NIL when ERRORP is NIL."
+  (let* ((name (string-downcase charset))
+         (name (if (and (> (length name) 8) (string= "windows-" name :end2 8))
+                   (concatenate 'string "cp" (subseq name 8))
+                   name))
+         (keyword (find-symbol (string-upcase name) :keyword))
+         (encoding (and keyword (encoding-protocol:normalize-encoding keyword))))
+    (cond
+     ((and encoding
+           (not (member encoding '(:base64 :base64url :base32 :base32hex :base16
+                                   :quoted-printable :rle))))
+      encoding)
+     (errorp
+      (error 'mail-parse-error :message (format nil "unknown charset ~S" charset)))
+     (t nil))))
+
+(defun %mail-text-entity (text &rest keys &key (charset "utf-8") &allow-other-keys)
+  "MIME-PROTOCOL:MAKE-TEXT-ENTITY for mail. TEXT is encoded in CHARSET, as
+its Content-Type says (MAKE-TEXT-ENTITY always writes UTF-8). The part is
+8bit, or quoted-printable when the text would not survive 8bit SMTP (a line
+over 998 octets, a NUL), as Python's EmailMessage switches to
+quoted-printable for long lines; a relay would otherwise break the line."
+  (let ((entity (apply #'mime-protocol:make-text-entity text keys)))
+    (when (and charset (not (member charset '("utf-8" "utf8") :test #'string-equal)))
+      (setf (mime-protocol:mime-content entity)
+            (encoding-protocol:encode text :encoding (%charset-encoding charset))))
+    (when (%overlong-line-p (mime-protocol:mime-content entity))
+      (setf (mime-protocol:mime-transfer-encoding entity) :quoted-printable))
+    entity))
+
 (defun message-from (msg)
-  (mime-protocol:header-value (message-entity msg) "from"))
+  "The From field, encoded-words in display names decoded
+(\"Zoë <zoe@ex.com>\"), or NIL."
+  (let ((raw (mime-protocol:header-value (message-entity msg) "from")))
+    (and raw
+         (if (search "=?" raw)
+             (format nil "~{~A~^, ~}" (mapcar #'%display-address (address-list raw)))
+             raw))))
 
 (defun (setf message-from) (value msg)
-  (mime-protocol:set-header (message-entity msg) "from" value)
+  (mime-protocol:set-header (message-entity msg) "from" (%join-addresses (address-list value)))
   value)
 
 (defun message-to (msg)
-  (address-list (mime-protocol:header-value (message-entity msg) "to")))
+  "The To addresses, encoded-words in display names decoded."
+  (mapcar #'%display-address
+          (address-list (mime-protocol:header-value (message-entity msg) "to"))))
 
 (defun (setf message-to) (value msg)
   (let ((addrs (address-list value)))
@@ -43,9 +100,10 @@
     addrs))
 
 (defun message-cc (msg)
+  "The Cc addresses, encoded-words in display names decoded."
   (let ((raw (mime-protocol:header-value (message-entity msg) "cc")))
     (when (and raw (plusp (length raw)))
-      (address-list raw))))
+      (mapcar #'%display-address (address-list raw)))))
 
 (defun (setf message-cc) (value msg)
   (let ((addrs (address-list value)))
@@ -57,17 +115,27 @@
     addrs))
 
 (defun message-subject (msg)
-  (or (mime-protocol:header-value (message-entity msg) "subject") ""))
+  "The Subject, RFC 2047 encoded-words decoded, or \"\"."
+  (mime-protocol:decode-header-text
+   (or (mime-protocol:header-value (message-entity msg) "subject") "")))
 
 (defun (setf message-subject) (value msg)
-  (mime-protocol:set-header (message-entity msg) "subject" (or value ""))
+  (mime-protocol:set-header (message-entity msg) "subject" (%wire-subject value))
   value)
 
 (defun %entity-text (entity)
-  (let ((content (mime-protocol:mime-content entity)))
+  "ENTITY's content as text, decoded in its Content-Type charset (UTF-8 when
+it names none encoding-protocol knows)."
+  (let ((content (mime-protocol:mime-content entity))
+        (type (mime-protocol:mime-content-type entity)))
     (cond
      ((stringp content) content)
-     ((vectorp content) (encoding-protocol:decode content))
+     ((vectorp content)
+      (encoding-protocol:decode
+       content
+       :encoding (or (let ((charset (and type (mime-protocol:media-type-charset type))))
+                       (and charset (%charset-encoding charset nil)))
+                     :utf-8)))
      (t ""))))
 
 (defun %media-type-p (entity type &optional subtype)
@@ -166,16 +234,23 @@ nonce is drawn again and the sequence starts over."
  nil)
 
 (defun %address-domain (address)
-  "The domain of the addr-spec in ADDRESS (\"Alice <a@ex.com>\" → \"ex.com\"), or NIL."
+  "The domain of the first addr-spec in ADDRESS (\"Alice <a@ex.com>\" →
+\"ex.com\"), when it can stand in a msg-id (RFC 5322 3.6.4: ASCII dot-atom
+text or a domain literal); else NIL."
   (when address
-    (let* ((lt (position #\< address :from-end t))
-           (spec (if lt
-                     (subseq address (1+ lt) (or (position #\> address :start lt)
-                                                 (length address)))
-                     address))
-           (at (position #\@ spec :from-end t))
-           (domain (and at (string-trim '(#\Space #\Tab #\>) (subseq spec (1+ at))))))
-      (and domain (plusp (length domain)) domain))))
+    (let* ((first (first (address-list address)))
+           (spec (and first
+                      (handler-case (car (first (%address-mailboxes first)))
+                        (mail-address-error () nil))))
+           (at (and spec (position #\@ spec :from-end t)))
+           (domain (and at (subseq spec (1+ at)))))
+      (and domain
+           (plusp (length domain))
+           (every (lambda (c)
+                    (and (< 32 (char-code c) 127)
+                         (not (find c "()<>:;@\\,\""))))
+                  domain)
+           domain))))
 
 (defun make-message-id (&key domain)
   "A new Message-ID \"<time.sequence.pid.nonce@DOMAIN>\", in base 36, like
@@ -194,19 +269,27 @@ domain."
                           (date t) (message-id t))
   "A new message. DATE is T (now), an RFC 5322 date string, a
 datetime-protocol INSTANT, or NIL (no Date header). MESSAGE-ID is T (a new
-one from MAKE-MESSAGE-ID with the From domain), a string, or NIL."
+one from MAKE-MESSAGE-ID with the From domain), a string, or NIL.
+
+FROM, TO, CC and BCC are address lists (see ADDRESS-LIST); a non-ASCII
+display name and a non-ASCII SUBJECT go out as RFC 2047 encoded-words.
+CR, LF or NUL in an address signals MAIL-ADDRESS-ERROR, and in the
+subject or another header MIME-PROTOCOL:MIME-HEADER-ERROR: a line break
+would add header fields or SMTP commands. The body is 8bit text, or
+quoted-printable when a line is longer than SMTP carries."
   (unless from
     (error 'mail-parse-error :message "make-message requires :from"))
-  (let* ((to-list (address-list to))
+  (let* ((from-list (address-list from))
+         (to-list (address-list to))
          (cc-list (address-list cc))
          (bcc-list (address-list bcc))
-         (entity (mime-protocol:make-text-entity body :subtype subtype)))
-    (mime-protocol:set-header entity "from" from)
+         (entity (%mail-text-entity body :subtype subtype)))
+    (mime-protocol:set-header entity "from" (%join-addresses from-list))
     (when to-list
       (mime-protocol:set-header entity "to" (%join-addresses to-list)))
     (when cc-list
       (mime-protocol:set-header entity "cc" (%join-addresses cc-list)))
-    (mime-protocol:set-header entity "subject" (or subject ""))
+    (mime-protocol:set-header entity "subject" (%wire-subject subject))
     (when date
       (mime-protocol:set-header entity "date"
                                 (etypecase date
@@ -258,9 +341,9 @@ multipart/alternative, else both in a new one."
   "Add CONTENT, a string, as another rendering of the body (HTML next to
 the plain text by default; Python EmailMessage.add_alternative). The body
 becomes multipart/alternative, inside the multipart/mixed when there are
-attachments. → MSG."
+attachments. CONTENT is encoded in CHARSET. → MSG."
   (check-type content string)
-  (let ((part (mime-protocol:make-text-entity content :subtype subtype :charset charset))
+  (let ((part (%mail-text-entity content :subtype subtype :charset charset))
         (top (message-entity msg)))
     (cond
      ((%multipart-of-p top "mixed")
@@ -276,6 +359,8 @@ attachments. → MSG."
   "Attach DATA, octets or a string (a text attachment) (Python
 EmailMessage.add_attachment). CONTENT-TYPE defaults from FILENAME's
 extension, else application/octet-stream (text/plain for a string).
+A string is encoded in the Content-Type's charset (default UTF-8); a string
+of a type other than text/* is sent as its UTF-8 octets, keeping the type.
 The message becomes multipart/mixed: the body first, then attachments in
 the order added; binary parts are base64. → MSG."
   (check-type data (or string (vector (unsigned-byte 8))))
@@ -283,13 +368,15 @@ the order added; binary parts are base64. → MSG."
                  (and filename (mime-protocol:lookup-mime filename nil))
                  (if (stringp data) "text/plain" "application/octet-stream")))
          (mt (mime-protocol:parse-media-type ct))
-         (part (if (stringp data)
-                   (mime-protocol:make-text-entity
+         (text-p (and (stringp data) (string= "text" (mime-protocol:media-type-type mt))))
+         (part (if text-p
+                   (%mail-text-entity
                     data :subtype (mime-protocol:media-type-subtype mt)
                     :charset (or (mime-protocol:media-type-charset mt) "utf-8")
                     :disposition-type disposition :filename filename)
                    (mime-protocol:make-binary-entity
-                    data :type (mime-protocol:media-type-type mt)
+                    (if (stringp data) (encoding-protocol:encode data :encoding :utf-8) data)
+                    :type (mime-protocol:media-type-type mt)
                     :subtype (mime-protocol:media-type-subtype mt)
                     :disposition-type disposition :filename filename)))
          (top (message-entity msg)))
@@ -315,14 +402,36 @@ the order added; binary parts are base64. → MSG."
       (error 'mail-parse-error :message (princ-to-string e)))))
 
 (defun print-message (msg &key stream)
-  "Serialize MSG (Bcc omitted — envelope only)."
+  "Serialize MSG (Bcc omitted — envelope only). The text is octets, one
+character per octet (MIME-PROTOCOL:PRINT-MIME): write it to the wire
+through ISO-8859-1. Header lines are folded at 78 (RFC 5322 2.1.1)."
   (unless (message-p msg)
     (error 'mail-parse-error :message "print-message expects a message"))
-  (mime-protocol:print-mime (message-entity msg) :stream stream))
+  (mime-protocol:print-mime (message-entity msg) :stream stream :max-line-length 78))
+
+(defun %addr-specs (addresses)
+  "The addr-specs of ADDRESSES (address strings), groups expanded."
+  (loop for address in addresses
+        append (mapcar #'car (address-mailboxes address))))
 
 (defun envelope-recipients (msg)
-  (delete-duplicates
-   (append (message-to msg)
-           (or (message-cc msg) '())
-           (or (message-bcc msg) '()))
-   :test #'string-equal))
+  "The SMTP envelope recipients of MSG: the addr-spec of every To, Cc and
+Bcc mailbox, group members included, each once, as smtplib's send_message
+takes them (\"Bob <bob@ex.com>\" → \"bob@ex.com\"). Signals
+MAIL-ADDRESS-ERROR for an address that does not parse."
+  (let ((entity (message-entity msg)))
+    (delete-duplicates
+     (%addr-specs (append (address-list (mime-protocol:header-value entity "to"))
+                          (address-list (mime-protocol:header-value entity "cc"))
+                          (message-bcc msg)))
+     :test #'string-equal :from-end t)))
+
+(defun envelope-sender (msg)
+  "The SMTP envelope sender of MSG (MAIL FROM): the addr-spec of the Sender
+field, else of the first From mailbox, as smtplib's send_message. NIL when
+there is neither. Signals MAIL-ADDRESS-ERROR for an address that does not
+parse."
+  (let* ((entity (message-entity msg))
+         (field (or (mime-protocol:header-value entity "sender")
+                    (mime-protocol:header-value entity "from"))))
+    (and field (first (%addr-specs (address-list field))))))

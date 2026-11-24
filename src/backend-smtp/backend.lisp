@@ -46,10 +46,12 @@ the original condition as its CAUSE (the report prints it)."
        (error 'mail-send-error :message (%endpoint ,backend) :cause e))))
 
 (defun %text-stream (binary)
-  "SMTP lines over BINARY: UTF-8, and #\\Newline is a bare LF (the
-dialogue writes CR LF itself)."
+  "SMTP lines over BINARY, one character per octet (ISO-8859-1): the
+dialogue writes PRINT-MESSAGE's octets as they are and commands as UTF-8,
+so nothing is encoded twice (#5). #\\Newline is a bare LF (the dialogue
+writes CR LF itself)."
   (flexi-streams:make-flexi-stream
-   binary :external-format (flexi-streams:make-external-format :utf-8 :eol-style :lf)))
+   binary :external-format (flexi-streams:make-external-format :latin-1 :eol-style :lf)))
 
 (defun %tls-stream (backend binary)
   "A TLS client stream over BINARY, with SNI and hostname verification."
@@ -66,9 +68,13 @@ being dropped, so its own transport errors are of no further use."
     ((or stream-error usocket:socket-error cl+ssl::cl+ssl-error) () nil)))
 
 (defmethod backend-send ((backend smtp-backend) message &key)
+  "Send MESSAGE over one SMTP connection. The envelope is the addr-specs of
+ENVELOPE-SENDER and ENVELOPE-RECIPIENTS (smtplib's send_message), worked
+out before connecting: an address that does not parse signals
+MAIL-ADDRESS-ERROR and nothing is sent."
   (unless (message-p message)
     (error 'mail-send-error :message "send expects a message"))
-  (let ((from (message-from message))
+  (let ((from (envelope-sender message))
         (rcpts (envelope-recipients message))
         (data (print-message message)))
     (unless from
@@ -76,9 +82,9 @@ being dropped, so its own transport errors are of no further use."
     (unless rcpts
       (error 'mail-send-error :message "no recipients"))
     (let ((socket (%with-transport-errors (backend)
-                                          (usocket:socket-connect (smtp-host backend) (smtp-port backend)
-                                                                  :element-type '(unsigned-byte 8)
-                                                                  :timeout (smtp-connect-timeout backend))))
+                    (usocket:socket-connect (smtp-host backend) (smtp-port backend)
+                                            :element-type '(unsigned-byte 8)
+                                            :timeout (smtp-connect-timeout backend))))
           (streams '()))
       (flet ((text (binary)
                (let ((s (%text-stream binary)))
@@ -86,20 +92,20 @@ being dropped, so its own transport errors are of no further use."
                  s)))
         (unwind-protect
             (%with-transport-errors (backend)
-                                    (let* ((raw (usocket:socket-stream socket))
-                                           (stream (text (if (smtp-tls backend)
-                                                             (%tls-stream backend raw)
-                                                             raw))))
-                                      (smtp-dialogue stream stream
-                                                     :from from
-                                                     :recipients rcpts
-                                                     :data data
-                                                     :ehlo-host (smtp-ehlo-host backend)
-                                                     :username (smtp-username backend)
-                                                     :password (slot-value backend 'password)
-                                                     :starttls (and (smtp-starttls backend)
-                                                                    (lambda ()
-                                                                      (let ((tls (text (%tls-stream backend raw))))
-                                                                        (values tls tls)))))))
+              (let* ((raw (usocket:socket-stream socket))
+                     (stream (text (if (smtp-tls backend)
+                                       (%tls-stream backend raw)
+                                       raw))))
+                (smtp-dialogue stream stream
+                               :from from
+                               :recipients rcpts
+                               :data data
+                               :ehlo-host (smtp-ehlo-host backend)
+                               :username (smtp-username backend)
+                               :password (slot-value backend 'password)
+                               :starttls (and (smtp-starttls backend)
+                                              (lambda ()
+                                                (let ((tls (text (%tls-stream backend raw))))
+                                                  (values tls tls)))))))
           (%close-quietly streams socket)))))
   message)

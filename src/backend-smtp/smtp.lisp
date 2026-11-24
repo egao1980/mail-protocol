@@ -4,8 +4,24 @@
   (write-char #\Return out)
   (write-char #\Newline out))
 
+(defun %octet-string (string)
+  "STRING as its UTF-8 octets, one character each: what the dialogue writes
+to its ISO-8859-1 stream. ASCII comes back as it is."
+  (if (every (lambda (c) (< (char-code c) 128)) string)
+      string
+      (map 'string #'code-char (encoding-protocol:encode string :encoding :utf-8))))
+
 (defun %write-line (out line)
-  (write-string line out)
+  "Write the SMTP command LINE and CRLF. A command holding CR or LF is
+refused with MAIL-SEND-ERROR before anything is written: the server would
+take the rest as another command (SMTP command injection, as smtplib's
+putcmd refuses it). Non-ASCII goes out as UTF-8 (SMTPUTF8)."
+  (let ((bad (position-if (lambda (c) (member c '(#\Return #\Newline))) line)))
+    (when bad
+      (error 'mail-send-error
+             :message (format nil "the SMTP command ~S holds ~:[LF~;CR~] at ~D; the rest would be sent as another command"
+                              line (char= #\Return (char line bad)) bad))))
+  (write-string (%octet-string line) out)
   (%crlf out)
   (finish-output out))
 
@@ -95,7 +111,12 @@ smuggling)."
   (encoding-protocol:encode (encoding-protocol:encode string) :encoding :base64))
 
 (defun %authenticate (in out extensions username password preference)
-  "AUTH with the first mechanism of PREFERENCE the server offers."
+  "AUTH with the first mechanism of PREFERENCE the server offers. A
+USERNAME or PASSWORD holding NUL is refused with MAIL-AUTH-ERROR before
+anything is sent: in AUTH PLAIN, NUL separates the fields (RFC 4616), so
+the server would read other credentials."
+  (when (or (find (code-char 0) username) (find (code-char 0) (or password "")))
+    (error 'mail-auth-error :message "the username or password holds NUL"))
   (let* ((offered (let ((p (%extension extensions "AUTH"))) (and (listp p) p)))
          (mechanism (find-if (lambda (m) (member m offered :test #'string-equal))
                              preference)))
@@ -119,39 +140,73 @@ smuggling)."
       (%expect in 235 :condition 'mail-auth-error :what "AUTH LOGIN password")))
     mechanism))
 
+(defun %data-octets (data)
+  "DATA as an octet string, one character per octet: octets, or
+PRINT-MESSAGE's string as it is. A string holding a character above U+00FF
+is not such a string and signals MAIL-SEND-ERROR rather than being sent
+mangled."
+  (etypecase data
+    ((vector (unsigned-byte 8))
+     (map 'string #'code-char data))
+    (string
+     (let ((wide (position-if (lambda (c) (> (char-code c) 255)) data)))
+       (when wide
+         (error 'mail-send-error
+                :message (format nil "DATA holds U+~4,'0X at ~D; it must be PRINT-MESSAGE's octets, one character each"
+                                 (char-code (char data wide)) wide))))
+     data)))
+
 (defun smtp-dialogue (in out &key from recipients data (ehlo-host "localhost")
                          username password starttls
                          (auth-mechanisms '("PLAIN" "LOGIN")))
-  "Drive one SMTP transaction on character streams IN / OUT: greeting,
-EHLO, then STARTTLS when STARTTLS is a function (it is called after the
-server's 220 and returns the new IN and OUT, over TLS; EHLO is sent again),
-then AUTH when USERNAME is given (the first of AUTH-MECHANISMS the server
-offers: PLAIN, LOGIN), then MAIL / RCPT / DATA / QUIT. A server that does
-not offer a requested STARTTLS or AUTH signals MAIL-SEND-ERROR /
-MAIL-AUTH-ERROR rather than sending in the clear. → T."
+  "Drive one SMTP transaction on character streams IN / OUT, one character
+per octet (ISO-8859-1): greeting, EHLO, then STARTTLS when STARTTLS is a
+function (it is called after the server's 220 and returns the new IN and
+OUT, over TLS; EHLO is sent again), then AUTH when USERNAME is given (the
+first of AUTH-MECHANISMS the server offers: PLAIN, LOGIN), then MAIL / RCPT
+/ DATA / QUIT. A server that does not offer a requested STARTTLS or AUTH
+signals MAIL-SEND-ERROR / MAIL-AUTH-ERROR rather than sending in the clear.
+
+FROM and each of RECIPIENTS go into MAIL FROM / RCPT TO as their addr-spec
+(PARSE-ADDRESS: \"Ann <ann@ex.com>\" → <ann@ex.com>); one that does not
+parse, or holds CR or LF, signals MAIL-ADDRESS-ERROR before anything is
+sent. DATA is PRINT-MESSAGE's string (one character per octet) or octets.
+MAIL FROM gets BODY=8BITMIME when DATA has 8-bit octets and the server
+offers it, and SMTPUTF8 when an address is not ASCII (a server without
+SMTPUTF8 then signals MAIL-SEND-ERROR). → T."
   (unless (and from recipients data)
     (error 'mail-send-error :message "smtp-dialogue needs :from :recipients :data"))
-  (%expect in 220 :what "greeting")
-  (let ((extensions (%ehlo in out ehlo-host)))
-    (when starttls
-      (unless (%extension extensions "STARTTLS")
-        (error 'mail-send-error :message "the server does not offer STARTTLS"))
-      (%write-line out "STARTTLS")
-      (%expect in 220 :what "STARTTLS")
-      (multiple-value-setq (in out) (funcall starttls))
-      (setf extensions (%ehlo in out ehlo-host)))
-    (when username
-      (%authenticate in out extensions username password auth-mechanisms)))
-  (%write-line out (format nil "MAIL FROM:<~A>" from))
-  (%expect in 250 :what "MAIL FROM")
-  (dolist (rcpt recipients)
-    (%write-line out (format nil "RCPT TO:<~A>" rcpt))
-    (%expect in '(250 251) :what "RCPT TO"))
-  (%write-line out "DATA")
-  (%expect in 354 :what "DATA")
-  (write-string (dot-stuff data) out)
-  (finish-output out)
-  (%expect in 250 :what "message")
-  (%write-line out "QUIT")
-  (%expect in 221 :what "QUIT")
-  t)
+  (let* ((from (parse-address from))
+         (recipients (mapcar #'parse-address recipients))
+         (data (%data-octets data))
+         (8bit (find-if (lambda (c) (> (char-code c) 127)) data))
+         (utf8 (notevery (lambda (address) (every (lambda (c) (< (char-code c) 128)) address))
+                         (cons from recipients))))
+    (%expect in 220 :what "greeting")
+    (let ((extensions (%ehlo in out ehlo-host)))
+      (when starttls
+        (unless (%extension extensions "STARTTLS")
+          (error 'mail-send-error :message "the server does not offer STARTTLS"))
+        (%write-line out "STARTTLS")
+        (%expect in 220 :what "STARTTLS")
+        (multiple-value-setq (in out) (funcall starttls))
+        (setf extensions (%ehlo in out ehlo-host)))
+      (when username
+        (%authenticate in out extensions username password auth-mechanisms))
+      (when (and utf8 (not (%extension extensions "SMTPUTF8")))
+        (error 'mail-send-error
+               :message "an envelope address is not ASCII and the server does not offer SMTPUTF8"))
+      (%write-line out (format nil "MAIL FROM:<~A>~:[~; BODY=8BITMIME~]~:[~; SMTPUTF8~]"
+                               from (and 8bit (%extension extensions "8BITMIME")) utf8)))
+    (%expect in 250 :what "MAIL FROM")
+    (dolist (rcpt recipients)
+      (%write-line out (format nil "RCPT TO:<~A>" rcpt))
+      (%expect in '(250 251) :what "RCPT TO"))
+    (%write-line out "DATA")
+    (%expect in 354 :what "DATA")
+    (write-string (dot-stuff data) out)
+    (finish-output out)
+    (%expect in 250 :what "message")
+    (%write-line out "QUIT")
+    (%expect in 221 :what "QUIT")
+    t))

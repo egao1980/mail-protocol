@@ -59,6 +59,11 @@
            #:encode-imap-command
            #:parse-imap-response
            #:parse-imap-untagged
-           #:next-imap-tag))
+           #:next-imap-tag
+           #:mail-address-error
+           #:mail-address-error-address
+           #:parse-address
+           #:address-mailboxes
+           #:envelope-sender))
 
 (in-package #:mail-protocol)
