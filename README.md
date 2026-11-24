@@ -25,7 +25,7 @@ Bcc is envelope-only (stripped from `print-message`).
   (stack-mail:print-message msg))
 ```
 
-- `make-message` writes `Date` (RFC 5322, UTC: `Mon, 23 Nov 2026 21:04:05 +0000`) and `Message-ID` (`<time.random@domain-of-From>`). `:date` takes `t` (now, from datetime-protocol's clock), a string, an `instant` or `nil`; `:message-id` takes `t`, a string or `nil`. `format-message-date` / `make-message-id` are `email.utils.formatdate` / `make_msgid`.
+- `make-message` writes `Date` (RFC 5322, UTC: `Mon, 23 Nov 2026 21:04:05 +0000`) and `Message-ID` (`<time.sequence.nonce@domain-of-From>`: a per-process counter taken under a lock, so IDs never repeat across threads, and 64 random bits per process). `:date` takes `t` (now, from datetime-protocol's clock), a string, an `instant` or `nil`; `:message-id` takes `t`, a string or `nil`. `format-message-date` / `make-message-id` are `email.utils.formatdate` / `make_msgid`.
 - Header names print in canonical case (`From`, `Subject`, `MIME-Version`, `Message-ID`).
 - `add-alternative content &key (subtype "html") charset` makes the body `multipart/alternative`. `add-attachment data &key content-type filename disposition` makes the message `multipart/mixed` (body first). Octets are base64; a string is a text attachment. The content type defaults from the filename. Either order nests as `mixed(alternative(text, html), attachments…)`.
 - Reading: `message-body` (`:subtype "html"` for the HTML part), `message-attachments`, `message-date`, `message-id`.

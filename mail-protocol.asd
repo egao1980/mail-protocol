@@ -3,7 +3,8 @@
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "mime-protocol" "0.3.0") "encoding-protocol" "datetime-protocol")
+  :depends-on ((:version "mime-protocol" "0.3.0") "encoding-protocol" "datetime-protocol"
+               "bordeaux-threads")
   :properties (:cl-repo (:ci (:with ("mail-backend-memory" "mail-backend-smtp"))))
   :serial t
   :pathname "src"

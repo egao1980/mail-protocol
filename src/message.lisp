@@ -125,12 +125,28 @@ attachment (Python EmailMessage.get_body), else \"\"."
   (let ((imf (datetime-protocol:print-http-date instant)))
     (concatenate 'string (subseq imf 0 (- (length imf) 3)) "+0000")))
 
-(defvar *message-id-random-state* nil
-  "Seeded from the OS on first use in each process. A saved image starts
-with NIL again, so two processes of one image do not repeat IDs.")
+(defvar *message-id-nonce* nil
+  "64 random bits drawn from the OS on first use in each process; they keep
+two processes (or two runs of one saved image) apart. A saved image starts
+with NIL again.")
+
+(defvar *message-id-counter* 0
+  "IDs made so far in this process; each Message-ID takes the next value.")
+
+(defvar *message-id-lock* (bt2:make-lock :name "mail-protocol message-id")
+  "Guards *MESSAGE-ID-COUNTER* and the first draw of *MESSAGE-ID-NONCE*:
+senders on several threads must never get the same pair.")
+
+(defun %next-message-id-parts ()
+  "→ (values sequence nonce), a pair no other call in this process returns."
+  (bt2:with-lock-held (*message-id-lock*)
+    (values (incf *message-id-counter*)
+            (or *message-id-nonce*
+                (setf *message-id-nonce*
+                      (random (expt 2 64) (make-random-state t)))))))
 
 (uiop:register-image-restore-hook
- (lambda () (setf *message-id-random-state* nil))
+ (lambda () (setf *message-id-nonce* nil))
  nil)
 
 (defun %address-domain (address)
@@ -146,15 +162,15 @@ with NIL again, so two processes of one image do not repeat IDs.")
       (and domain (plusp (length domain)) domain))))
 
 (defun make-message-id (&key domain)
-  "A new Message-ID \"<time.random@DOMAIN>\" (Python email.utils.make_msgid):
-the universal time and 64 random bits, base 36. DOMAIN defaults to
+  "A new Message-ID \"<time.sequence.nonce@DOMAIN>\", in base 36 (Python
+email.utils.make_msgid has time, pid and a random number). SEQUENCE counts
+the IDs of this process under a lock, so no two calls, on any thread,
+return the same ID; NONCE is 64 random bits per process, which keeps
+processes apart (RFC 5322 3.6.4: globally unique). DOMAIN defaults to
 \"localhost\"; MAKE-MESSAGE passes the From address's domain."
-  (let ((state (or *message-id-random-state*
-                   (setf *message-id-random-state* (make-random-state t)))))
-    (format nil "<~(~36R.~36R~)@~A>"
-            (get-universal-time)
-            (random (expt 2 64) state)
-            (or domain "localhost"))))
+  (multiple-value-bind (sequence nonce) (%next-message-id-parts)
+    (format nil "<~(~36R.~36R.~36R~)@~A>"
+            (get-universal-time) sequence nonce (or domain "localhost"))))
 
 (defun make-message (&key from to cc bcc subject (body "") (subtype "plain")
                           (date t) (message-id t))
