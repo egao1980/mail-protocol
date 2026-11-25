@@ -79,68 +79,75 @@ The depth of < and > is the depth outside them."
     (and (> code 32) (/= code 127)
          (not (find c "()<>[]:;@\\,.\"")))))
 
-(defun %address-tokens (address)
+(defun %address-tokens (address &key blanks)
   "ADDRESS (one address) as tokens: (:atom . text), (:quoted . content with
 quoted-pairs undone), (:literal . \"[...]\"), or one of the characters
-< > @ . , : ;. Blanks and comments are dropped. Signals MAIL-ADDRESS-ERROR
-on an unterminated quoted string, comment or literal, or a stray character."
+< > @ . , : ;. Blanks and comments are dropped; with BLANKS each run of
+them is one :BLANK token, so a phrase keeps its spacing (\"J.R.R. Tolkien\").
+Signals MAIL-ADDRESS-ERROR on an unterminated quoted string, comment or
+literal, or a stray character."
   (let ((tokens '())
         (i 0)
         (n (length address)))
-    (loop while (< i n)
-          do (let ((c (char address i)))
-               (cond
-                ((member c '(#\Space #\Tab))
-                 (incf i))
-                ((char= c #\()
-                 (let ((depth 1))
-                   (incf i)
-                   (loop while (and (< i n) (plusp depth))
-                         do (case (char address i)
-                              (#\\ (incf i))
-                              (#\( (incf depth))
-                              (#\) (decf depth)))
-                            (incf i))
-                   (when (plusp depth)
-                     (%address-fail address "unterminated comment"))))
-                ((char= c #\")
-                 (let ((out (make-string-output-stream)))
-                   (incf i)
-                   (loop
-                     (when (>= i n)
-                       (%address-fail address "unterminated quoted string"))
-                     (let ((d (char address i)))
-                       (cond
-                        ((char= d #\\)
-                         (when (>= (1+ i) n)
-                           (%address-fail address "unterminated quoted string"))
-                         (write-char (char address (1+ i)) out)
-                         (incf i 2))
-                        ((char= d #\")
-                         (incf i)
-                         (return))
-                        (t
-                         (write-char d out)
-                         (incf i)))))
-                   (push (cons :quoted (get-output-stream-string out)) tokens)))
-                ((char= c #\[)
-                 (let ((end (position #\] address :start i)))
-                   (unless end
-                     (%address-fail address "unterminated domain literal"))
-                   (when (find-if (lambda (d) (member d '(#\[ #\\ #\Space #\Tab)))
-                                  address :start (1+ i) :end end)
-                     (%address-fail address "a domain literal holds [, \\ or a blank"))
-                   (push (cons :literal (subseq address i (1+ end))) tokens)
-                   (setf i (1+ end))))
-                ((find c "<>@.,:;")
-                 (push c tokens)
-                 (incf i))
-                ((%atom-char-p c)
-                 (let ((end (or (position-if-not #'%atom-char-p address :start i) n)))
-                   (push (cons :atom (subseq address i end)) tokens)
-                   (setf i end)))
-                (t
-                 (%address-fail address "stray character U+~4,'0X" (char-code c))))))
+    (flet ((blank ()
+             (when (and blanks (not (eq :blank (first tokens))))
+               (push :blank tokens))))
+      (loop while (< i n)
+            do (let ((c (char address i)))
+                 (cond
+                   ((member c '(#\Space #\Tab))
+                    (blank)
+                    (incf i))
+                   ((char= c #\()
+                    (let ((depth 1))
+                      (incf i)
+                      (loop while (and (< i n) (plusp depth))
+                            do (case (char address i)
+                                 (#\\ (incf i))
+                                 (#\( (incf depth))
+                                 (#\) (decf depth)))
+                               (incf i))
+                      (when (plusp depth)
+                        (%address-fail address "unterminated comment"))
+                      (blank)))
+                   ((char= c #\")
+                    (let ((out (make-string-output-stream)))
+                      (incf i)
+                      (loop
+                        (when (>= i n)
+                          (%address-fail address "unterminated quoted string"))
+                        (let ((d (char address i)))
+                          (cond
+                            ((char= d #\\)
+                             (when (>= (1+ i) n)
+                               (%address-fail address "unterminated quoted string"))
+                             (write-char (char address (1+ i)) out)
+                             (incf i 2))
+                            ((char= d #\")
+                             (incf i)
+                             (return))
+                            (t
+                             (write-char d out)
+                             (incf i)))))
+                      (push (cons :quoted (get-output-stream-string out)) tokens)))
+                   ((char= c #\[)
+                    (let ((end (position #\] address :start i)))
+                      (unless end
+                        (%address-fail address "unterminated domain literal"))
+                      (when (find-if (lambda (d) (member d '(#\[ #\\ #\Space #\Tab)))
+                                     address :start (1+ i) :end end)
+                        (%address-fail address "a domain literal holds [, \\ or a blank"))
+                      (push (cons :literal (subseq address i (1+ end))) tokens)
+                      (setf i (1+ end))))
+                   ((find c "<>@.,:;")
+                    (push c tokens)
+                    (incf i))
+                   ((%atom-char-p c)
+                    (let ((end (or (position-if-not #'%atom-char-p address :start i) n)))
+                      (push (cons :atom (subseq address i end)) tokens)
+                      (setf i end)))
+                   (t
+                    (%address-fail address "stray character U+~4,'0X" (char-code c)))))))
     (nreverse tokens)))
 
 (defun %quoted-string (text)
@@ -191,44 +198,52 @@ alone (\"postmaster\") is kept, as smtplib sends it."
                            (%dot-words domain-tokens address "domain" :quoted nil)))))))
 
 (defun %phrase-text (tokens address)
-  "The display name of phrase TOKENS: atoms with their RFC 2047
-encoded-words decoded, quoted strings as written, joined by spaces. NIL
-for no tokens."
-  (when tokens
-    (let ((parts '())
-          (atoms '()))
-      (flet ((flush ()
-               (when atoms
-                 (push (mime-protocol:decode-header-text
-                        (format nil "~{~A~^ ~}" (reverse atoms)))
-                       parts)
-                 (setf atoms '()))))
-        (dolist (token tokens)
-          (cond
-           ((eql token #\.)
-            (if atoms
-                (setf (first atoms) (concatenate 'string (first atoms) "."))
-                (push "." atoms)))
-           ((and (consp token) (eq :atom (car token)))
-            (push (cdr token) atoms))
-           ((and (consp token) (eq :quoted (car token)))
-            (flush)
-            (push (cdr token) parts))
-           (t
-            (%address-fail address "unexpected ~A in the display name"
-                           (if (consp token) (cdr token) token)))))
-        (flush))
+  "The display name of phrase TOKENS (%ADDRESS-TOKENS with :BLANKS): a run
+of atoms and dots as written, a blank or comment inside it one space
+(\"J.R.R. Tolkien\", \"Zoë . Smith\", as email.utils.getaddresses reads
+them), its RFC 2047 encoded-words decoded; a quoted string as written; the
+pieces joined by spaces. NIL when TOKENS hold no word."
+  (let ((parts '())
+        (run (make-string-output-stream))
+        (in-run nil)
+        (blank nil))
+    (flet ((flush ()
+             (when in-run
+               (push (mime-protocol:decode-header-text (get-output-stream-string run)) parts)
+               (setf in-run nil))))
+      (dolist (token tokens)
+        (cond
+          ((eq token :blank)
+           (setf blank t))
+          ((or (eql token #\.) (and (consp token) (eq :atom (car token))))
+           (when (and in-run blank)
+             (write-char #\Space run))
+           (write-string (if (consp token) (cdr token) ".") run)
+           (setf in-run t blank nil))
+          ((and (consp token) (eq :quoted (car token)))
+           (flush)
+           (push (cdr token) parts)
+           (setf blank nil))
+          (t
+           (%address-fail address "unexpected ~A in the display name"
+                          (if (consp token) (cdr token) token)))))
+      (flush))
+    (when parts
       (format nil "~{~A~^ ~}" (reverse parts)))))
 
 (defun %parse-mailbox (address)
   "Mailbox ADDRESS: name-addr ([display-name] <addr-spec>, an obsolete
-route allowed) or a bare addr-spec, comments anywhere.
-→ (values addr-spec display-name)."
-  (let* ((tokens (%address-tokens (%refuse-line-breaks address)))
+route allowed) or a bare addr-spec, comments anywhere. <> is the null path,
+addr-spec \"\" (\"Mailer Daemon <>\", \"<> (bounce)\"), as getaddresses
+reads it. → (values addr-spec display-name route), ROUTE the obsolete
+route's tokens or NIL."
+  (let* ((spaced (%address-tokens (%refuse-line-breaks address) :blanks t))
+         (tokens (remove :blank spaced))
          (lt (position #\< tokens)))
     (if (null lt)
-        (values (%addr-spec-text tokens address) nil)
-        (let ((gt (position #\> tokens :start lt)))
+        (values (%addr-spec-text tokens address) nil nil)
+        (let ((gt (position #\> tokens :start lt))
+              (route nil))
           (unless gt
             (%address-fail address "no > after <"))
           (when (nthcdr (1+ gt) tokens)
@@ -239,9 +254,13 @@ route allowed) or a bare addr-spec, comments anywhere.
               (let ((colon (position #\: inner)))
                 (unless colon
                   (%address-fail address "a route without a colon"))
-                (setf inner (subseq inner (1+ colon)))))
-            (values (%addr-spec-text inner address)
-                    (%phrase-text (subseq tokens 0 lt) address)))))))
+                (setf route (subseq inner 0 colon)
+                      inner (subseq inner (1+ colon)))))
+            (values (if (and (null inner) (null route))
+                        ""
+                        (%addr-spec-text inner address))
+                    (%phrase-text (subseq spaced 0 (position #\< spaced)) address)
+                    route))))))
 
 (defun %group-bounds (address)
   "→ (values colon semicolon) when ADDRESS is a group (display-name \":\"
@@ -258,13 +277,18 @@ route allowed) or a bare addr-spec, comments anywhere.
       (values colon semicolon))))
 
 (defun %address-mailboxes (address)
-  "The mailboxes of one ADDRESS: itself, or a group's members. Signals
-MAIL-ADDRESS-ERROR. → list of (addr-spec . display-name)."
+  "The mailboxes of one ADDRESS: itself, or a group's members. A group
+whose display name is not a phrase (\"Bob <bob@x>: eve@y;\") is refused:
+getaddresses reads no mailbox there, so its members are no recipients.
+Signals MAIL-ADDRESS-ERROR. → list of (addr-spec . display-name)."
   (multiple-value-bind (colon semicolon) (%group-bounds address)
     (if (null colon)
         (multiple-value-bind (spec name) (%parse-mailbox address)
           (list (cons spec name)))
         (progn
+          (when (intersection '(#\< #\> #\@) (%address-tokens (subseq address 0 colon)))
+            (%address-fail address "the group's display name is an address"))
+          (%phrase-text (%address-tokens (subseq address 0 colon) :blanks t) address)
           (when (and semicolon (%address-tokens (subseq address (1+ semicolon))))
             (%address-fail address "text after the group's ;"))
           (loop for member in (%split-address-list
@@ -359,64 +383,95 @@ a phrase (quoted where it needs it)."
       (mime-protocol:encode-encoded-words name)
       (%display-phrase name)))
 
+(defun %wire-comment (comment)
+  "COMMENT's text for the wire: encoded-words when it needs them."
+  (if (%needs-encoded-words-p comment)
+      (mime-protocol:encode-encoded-words comment)
+      comment))
+
 (defun %wire-mailbox (address)
   "Mailbox ADDRESS for the wire: display-name <addr-spec> (comments), or
 addr-spec (comments) without a display name, the display name and comments
-as encoded-words where they need them (RFC 2047 5 (2), (3)). ADDRESS comes
-back as written when neither does."
-  (multiple-value-bind (spec name) (%parse-mailbox address)
+as encoded-words where they need them (RFC 2047 5 (2), (3)). A non-ASCII
+obsolete route is dropped: it has no encoded form, and a reader ignores it
+(RFC 5322 4.4). ADDRESS comes back as written when none of them needs it."
+  (multiple-value-bind (spec name route) (%parse-mailbox address)
     (let ((comments (%address-comments address)))
       (if (and (or (null name) (not (%needs-encoded-words-p name)))
-               (notany #'%needs-encoded-words-p comments))
+               (notany #'%needs-encoded-words-p comments)
+               (every (lambda (token)
+                        (or (characterp token) (%ascii-p (cdr token))))
+                      route))
           address
-          (format nil "~:[~*~A~;~A <~A>~]~{ (~A)~}"
-                  (and name (plusp (length name)))
-                  (and name (plusp (length name)) (%wire-phrase name))
-                  spec
-                  (mapcar (lambda (comment)
-                            (if (%needs-encoded-words-p comment)
-                                (mime-protocol:encode-encoded-words comment)
-                                comment))
-                          comments))))))
+          (let ((phrase (and name (plusp (length name)) (%wire-phrase name))))
+            (format nil "~@[~A ~]~:[~A~;<~A>~]~{ (~A)~}"
+                    phrase
+                    (or phrase (zerop (length spec)))
+                    spec
+                    (mapcar #'%wire-comment comments)))))))
 
 (defun %wire-group (address colon semicolon)
   "Group ADDRESS (its \":\" at COLON, \";\" at SEMICOLON) for the wire: the
-group's display name and each member as %WIRE-ADDRESS writes them."
-  (let ((name (%phrase-text (%address-tokens (subseq address 0 colon)) address))
-        (members (%split-address-list (subseq address (1+ colon) (or semicolon (length address))))))
-    (if (null name)
-        address
-        (format nil "~A: ~{~A~^, ~};" (%wire-phrase name) (mapcar #'%wire-address members)))))
+group's display name (empty allowed) and the comments around it, each
+member as %WIRE-ADDRESS writes it, then the comments after the \";\". An
+encoded-word name gets a blank before the \":\" (RFC 2047 5 (3)).
+Signals MAIL-ADDRESS-ERROR for a group ADDRESS-MAILBOXES refuses, such as
+one with an address after its \";\": writing only the group would drop that
+address from To and from the envelope."
+  (%address-mailboxes address)
+  (let* ((head (subseq address 0 colon))
+         (name (%phrase-text (%address-tokens head :blanks t) address))
+         (members (%split-address-list
+                   (subseq address (1+ colon) (or semicolon (length address)))))
+         (tail (and semicolon (%address-comments (subseq address (1+ semicolon)))))
+         (parts (append (and name (plusp (length name)) (list (%wire-phrase name)))
+                        (mapcar (lambda (comment) (format nil "(~A)" (%wire-comment comment)))
+                                (%address-comments head))))
+         (last-part (car (last parts))))
+    (format nil "~{~A~^ ~}~:[~; ~]: ~{~A~^, ~};~{ (~A)~}"
+            parts
+            (and last-part (> (length last-part) 1)
+                 (string= "?=" last-part :start2 (- (length last-part) 2)))
+            (mapcar #'%wire-address members)
+            (mapcar #'%wire-comment tail))))
 
 (defun %wire-address (address)
   "ADDRESS for a header field, as Python's EmailMessage writes it: a display
 name (of a mailbox or a group) or a comment that is not ASCII, or holds a
 word too long to fold, becomes RFC 2047 encoded-words (RFC 2047 5 (2),
-(3)); a group's members are written the same way. An ASCII address, and
-one that does not parse, is kept as written."
-  (if (and (%ascii-p address) (not (%long-word-p address)))
-      address
-      (handler-case
-          (multiple-value-bind (colon semicolon) (%group-bounds address)
-            (if colon
-                (%wire-group address colon semicolon)
-                (%wire-mailbox address)))
-        (mail-address-error () address))))
+(3)); a group's members are written the same way, a non-ASCII obsolete
+route dropped. An ASCII address is kept as written, also when it does not
+parse (the envelope refuses it). A non-ASCII one that does not parse
+signals MAIL-ADDRESS-ERROR: it has no form fit for the header."
+  (flet ((wire ()
+           (multiple-value-bind (colon semicolon) (%group-bounds address)
+             (if colon
+                 (%wire-group address colon semicolon)
+                 (%wire-mailbox address)))))
+    (cond
+      ((not (%ascii-p address))
+       (wire))
+      ((not (%long-word-p address))
+       address)
+      (t
+       (handler-case (wire)
+         (mail-address-error () address))))))
 
 (defun %display-address (address)
   "ADDRESS for a reader: encoded-words in a mailbox's or a group's display
-name decoded (a group's members too), each name quoted again where it needs
-it. Anything else as written."
+name decoded (a group's members too, also under an empty group name), each
+name quoted again where it needs it. Anything else as written."
   (if (not (search "=?" address))
       address
       (handler-case
           (multiple-value-bind (colon semicolon) (%group-bounds address)
             (if colon
-                (let ((name (%phrase-text (%address-tokens (subseq address 0 colon)) address)))
-                  (if (null name)
+                (let* ((head (subseq address 0 colon))
+                       (name (%phrase-text (%address-tokens head :blanks t) address)))
+                  (if (and (null name) (%address-comments head))
                       address
-                      (format nil "~A: ~{~A~^, ~};"
-                              (%display-phrase name)
+                      (format nil "~@[~A~]: ~{~A~^, ~};"
+                              (and name (plusp (length name)) (%display-phrase name))
                               (mapcar #'%display-address
                                       (%split-address-list
                                        (subseq address (1+ colon) (or semicolon (length address))))))))

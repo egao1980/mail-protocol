@@ -170,8 +170,9 @@ signals MAIL-SEND-ERROR / MAIL-AUTH-ERROR rather than sending in the clear.
 FROM and each of RECIPIENTS go into MAIL FROM / RCPT TO as their addr-spec
 (PARSE-ADDRESS: \"Ann <ann@ex.com>\" → <ann@ex.com>); one that does not
 parse, or holds CR or LF, signals MAIL-ADDRESS-ERROR before anything is
-sent. FROM \"\" or \"<>\" is the null reverse-path, MAIL FROM:<> (RFC 5321
-4.5.5: bounces, DSNs, auto-replies). DATA is PRINT-MESSAGE's string (one
+sent. FROM \"\", \"<>\" or a mailbox <> (\"Mailer Daemon <>\") is the null
+reverse-path, MAIL FROM:<> (RFC 5321 4.5.5: bounces, DSNs, auto-replies);
+a recipient <> signals MAIL-ADDRESS-ERROR. DATA is PRINT-MESSAGE's string (one
 character per octet) or octets. MAIL FROM gets BODY=8BITMIME when DATA has
 8-bit octets and the server offers it, and SMTPUTF8 when an address is not
 ASCII (a server without SMTPUTF8 then signals MAIL-SEND-ERROR).
@@ -185,7 +186,14 @@ never retries a delivered message. → T."
   (let* ((from (if (member (string-trim '(#\Space #\Tab) from) '("" "<>") :test #'string=)
                    ""
                    (parse-address from)))
-         (recipients (mapcar #'parse-address recipients))
+         (recipients (mapcar (lambda (recipient)
+                               (let ((spec (parse-address recipient)))
+                                 (when (string= "" spec)
+                                   (error 'mail-address-error
+                                          :address recipient
+                                          :message "the null path <> is not a recipient"))
+                                 spec))
+                             recipients))
          (data (%data-octets data))
          (8bit (find-if (lambda (c) (> (char-code c) 127)) data))
          (utf8 (notevery (lambda (address) (every (lambda (c) (< (char-code c) 128)) address))
