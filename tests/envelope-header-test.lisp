@@ -81,8 +81,10 @@
 (deftest-parametrize parse-address-refuses-what-is-no-mailbox
     ((address)
      ("bob@example.com>") ("<bob@example.com") ("\"unterminated <x@example.com>")
-     ("a@b@example.com") ("Team: a@example.com;") ("") ("<>") ("a@example.com."))
+     ("a@b@example.com") ("Team: a@example.com;") ("") ("a@example.com."))
   (ok (signals (parse-address address) 'mail-address-error) (format nil "~S" address)))
+
+;;; "<>" is the null path (#11, getaddresses: ('', '')): tests/issue-11-test.lisp.
 
 (deftest parse-address-use-value-restart
   (let ((spec (handler-bind ((mail-address-error (lambda (c) (use-value "ok@example.com" c))))

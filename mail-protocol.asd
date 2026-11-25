@@ -1,5 +1,5 @@
 (defsystem "mail-protocol"
-  :version "0.3.0"
+  :version "0.3.1"
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"

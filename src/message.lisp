@@ -377,13 +377,13 @@ EmailMessage.add_attachment). CONTENT-TYPE defaults from FILENAME's
 extension, else application/octet-stream (text/plain for a string).
 A string is encoded in the Content-Type's charset (default UTF-8); a string
 of a type other than text/* is sent as its UTF-8 octets, keeping the type.
-DISPOSITION must be a token (\"attachment\", \"inline\"); one with \";\" or
-\"=\" signals MAIL-PARSE-ERROR rather than add parameters. A long non-ASCII
-FILENAME goes out as RFC 2231 continuations (mime-protocol).
-The message becomes multipart/mixed: the body first, then attachments in
-the order added; binary parts are base64. → MSG."
+DISPOSITION must be a token (\"attachment\", \"inline\"); NIL is \"attachment\",
+and one with \";\" or \"=\" signals MAIL-PARSE-ERROR rather than add
+parameters. A long non-ASCII FILENAME goes out as RFC 2231 continuations
+(mime-protocol). The message becomes multipart/mixed: the body first, then
+attachments in the order added; binary parts are base64. → MSG."
   (check-type data (or string (vector (unsigned-byte 8))))
-  (%check-token disposition "disposition")
+  (setf disposition (%check-token (or disposition "attachment") "disposition"))
   (let* ((ct (or content-type
                  (and filename (mime-protocol:lookup-mime filename nil))
                  (if (stringp data) "text/plain" "application/octet-stream")))
@@ -429,10 +429,15 @@ through ISO-8859-1. Header lines are folded at 78 (RFC 5322 2.1.1)."
     (error 'mail-parse-error :message "print-message expects a message"))
   (mime-protocol:print-mime (message-entity msg) :stream stream :max-line-length 78))
 
-(defun %addr-specs (addresses)
-  "The addr-specs of ADDRESSES (address strings), groups expanded."
+(defun %addr-specs (addresses &key recipients)
+  "The addr-specs of ADDRESSES (address strings), groups expanded. With
+RECIPIENTS, the null path (<>) signals MAIL-ADDRESS-ERROR: RFC 5321 4.5.5
+names it for MAIL FROM only, and RCPT TO:<> is no mailbox."
   (loop for address in addresses
-        append (mapcar #'car (address-mailboxes address))))
+        append (let ((specs (mapcar #'car (address-mailboxes address))))
+                 (when (and recipients (member "" specs :test #'string=))
+                   (%address-fail address "the null path <> is not a recipient"))
+                 specs)))
 
 (defun %mailbox-key (spec)
   "SPEC with its domain in lowercase: the local part is case-sensitive, the
@@ -448,20 +453,22 @@ Bcc mailbox, group members included, each once, as smtplib's send_message
 takes them (\"Bob <bob@ex.com>\" → \"bob@ex.com\"). Two addresses are the
 same mailbox when they differ only in the case of the domain: the local part
 is case-sensitive (RFC 5321 2.4). Signals MAIL-ADDRESS-ERROR for an address
-that does not parse."
+that does not parse, or for the null path <>."
   (let ((entity (message-entity msg)))
     (delete-duplicates
      (%addr-specs (append (address-list (mime-protocol:header-value entity "to"))
                           (address-list (mime-protocol:header-value entity "cc"))
-                          (message-bcc msg)))
+                          (message-bcc msg))
+                  :recipients t)
      :test #'string= :key #'%mailbox-key :from-end t)))
 
 (defun envelope-sender (msg)
   "The SMTP envelope sender of MSG (MAIL FROM): the addr-spec of the Sender
 field, else of the first From mailbox, as smtplib's send_message. \"\" (the
 null reverse-path, MAIL FROM:<>, RFC 5321 4.5.5) when that field is empty
-or \"<>\". NIL when there is neither field. Signals MAIL-ADDRESS-ERROR for
-an address that does not parse."
+or its mailbox is <> (\"Mailer Daemon <>\", \"<> (bounce)\"). NIL when there is
+neither field. Signals MAIL-ADDRESS-ERROR for an address that does not
+parse."
   (let* ((entity (message-entity msg))
          (field (or (mime-protocol:header-value entity "sender")
                     (mime-protocol:header-value entity "from"))))

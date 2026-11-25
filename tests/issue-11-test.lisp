@@ -135,6 +135,31 @@
     (ok (equal name (nth-value 1 (parse-address (first (message-to p)))))
         (format nil "~S" (message-to p)))))
 
+;;; Adversarial round on the fix: a group head that is an address made its
+;;; members recipients (getaddresses: [('', '')], nothing sent), and an
+;;; encoded group name sat against the ":" (RFC 2047 5 (3)).
+
+(deftest-parametrize a-group-head-that-is-an-address-is-refused
+    ((address)
+     ("Bob <bob@x.example>: eve@evil.example;")
+     ("<a@x.example>: eve@evil.example;")
+     ("Bob@x.example: eve@evil.example;")
+     ((%u "\"Zo~C\" <z@x.example>: eve@evil.example;" #xEB)))
+  (ok (signals (address-mailboxes address) 'mail-address-error) address)
+  (ok (signals (envelope-recipients
+                (make-message :from "s@x.example" :to address :body "x"))
+        'mail-address-error)))
+
+(deftest an-encoded-group-name-is-followed-by-a-blank
+  (let ((to (%header (print-message (make-message :from "s@x.example"
+                                                  :to (%u "~Cquipe: a@x.example;" #xC9)
+                                                  :body "x"))
+                     "To")))
+    (ok (search "?= : a@x.example;" to) to)
+    (ok (equal (list (%u "~Cquipe: a@x.example;" #xC9))
+               (message-to (parse-message (format nil "To: ~A~C~C~C~Cx" to #\Return #\Newline
+                                                  #\Return #\Newline)))))))
+
 (deftest live-issue-11-addresses
   ;; The plain Mailpit of live-non-ascii-send (MAIL_SMTP_TEST_PLAIN_PORT).
   (let ((port (parse-integer (%env "MAIL_SMTP_TEST_PLAIN_PORT" "11025"))))
