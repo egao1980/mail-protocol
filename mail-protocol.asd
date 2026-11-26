@@ -1,9 +1,9 @@
 (defsystem "mail-protocol"
-  :version "0.3.1"
+  :version "0.3.2"
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "mime-protocol" "0.3.3") "encoding-protocol" "datetime-protocol"
+  :depends-on ((:version "mime-protocol" "0.3.4") "encoding-protocol" "datetime-protocol"
                "bordeaux-threads")
   :properties (:cl-repo (:ci (:with ("mail-backend-memory" "mail-backend-smtp"))))
   :serial t
@@ -36,7 +36,8 @@
                (:file "envelope-header-test")
                (:file "adversarial-r4-test")
                (:file "round4-fixes-test")
-               (:file "issue-11-test"))
+               (:file "issue-11-test")
+               (:file "issue-11-break-3-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

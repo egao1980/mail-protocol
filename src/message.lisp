@@ -330,16 +330,15 @@ quoted-printable when a line is longer than SMTP carries."
 
 (defun %wrap-in-multipart (msg subtype)
   "Make MSG's entity the first part of a new multipart/SUBTYPE. The message
-headers (From, Subject, Date, ...) move to the new entity; the old one
-keeps its Content-* headers. → the new multipart."
+headers (From, Subject, Date, ...) move to the new entity with
+MIME-PROTOCOL:COPY-HEADERS, so a parsed field that was not UTF-8 keeps its
+octets; the old one keeps its Content-* headers. → the new multipart."
   (let* ((old (message-entity msg))
-         (headers (mime-protocol:mime-headers old))
          (new (mime-protocol:make-multipart-entity (list old) :subtype subtype)))
-    (setf (mime-protocol:mime-headers new)
-          (remove-if #'%content-header-p headers :key #'car)
-          (mime-protocol:mime-headers old)
-          (remove-if-not #'%content-header-p headers :key #'car)
-          (message-entity msg) new)))
+    (mime-protocol:copy-headers old new
+                                :test (complement #'%content-header-p)
+                                :remove t)
+    (setf (message-entity msg) new)))
 
 (defun %append-part (multipart part)
   (setf (mime-protocol:mime-parts multipart)
