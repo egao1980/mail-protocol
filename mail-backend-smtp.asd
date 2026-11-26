@@ -1,9 +1,9 @@
 (defsystem "mail-backend-smtp"
-  :version "0.3.1"
+  :version "0.3.2"
   :description "mail-protocol backend — SMTP over usocket, AUTH PLAIN/LOGIN, STARTTLS and implicit TLS through cl-stack-ssl (smtplib-shaped)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "mail-protocol" "0.3.1") "usocket" "cl-stack-ssl" "flexi-streams"
+  :depends-on ((:version "mail-protocol" "0.3.2") "usocket" "cl-stack-ssl" "flexi-streams"
                "encoding-protocol")
   :serial t
   :pathname "src/backend-smtp"
