@@ -4,9 +4,9 @@ Email **compose / parse / send / IMAP** for [cl-stack](https://github.com/egao19
 
 | System | Role | OCI |
 |--------|------|-----|
-| `mail-protocol` (`stack-mail`) | `make-message` / `add-alternative` / `add-attachment` / `parse-message` / `send` / IMAP | **0.3.2** |
-| `mail-backend-memory` | Default in tests — records sent messages | **0.3.2** |
-| `mail-backend-smtp` | SMTP: AUTH PLAIN / LOGIN, STARTTLS, implicit TLS (cl-stack-ssl) | **0.3.2** |
+| `mail-protocol` (`stack-mail`) | `make-message` / `add-alternative` / `add-attachment` / `parse-message` / `send` / IMAP | **0.3.3** |
+| `mail-backend-memory` | Default in tests — records sent messages | **0.3.3** |
+| `mail-backend-smtp` | SMTP: AUTH PLAIN / LOGIN, STARTTLS, implicit TLS (cl-stack-ssl) | **0.3.3** |
 
 Bcc is envelope-only (stripped from `print-message`).
 
@@ -66,7 +66,9 @@ Conditions: `mail-send-error` (`code` = SMTP reply code, `cause` = usocket / str
 
 ## IMAP
 
-IMAP (`imap-client`): `imap-connect` `imap-login` `imap-select` `imap-fetch` `imap-search` `imap-idle`. Inject a stream or `io-fn` — no live server required. FETCH RFC822 bodies go through `parse-message`. Conditions: `imap-error`, `imap-auth-error`.
+IMAP (`imap-client`): `imap-connect` `imap-login` `imap-select` `imap-fetch` `imap-search` `imap-capability` `imap-enable` `imap-idle`, and `imap-command` for any other command. Inject a stream or `io-fn` — no live server required. FETCH RFC822 bodies go through `parse-message`. Conditions: `imap-error`, `imap-auth-error`, `imap-argument-error`.
+
+Every argument is checked before anything is written (#9). CR, LF or NUL in a user, password, mailbox name, search criteria, sequence set or FETCH items is refused with `imap-argument-error`, as Python's `imaplib` refuses it: a line break would end the command and the rest would reach the server as another tagged command. A string goes as an atom when every character is an ASTRING-CHAR, else quoted (`\` and `"` escaped), as `imaplib`'s `_astring` does; 8-bit text, or more than 1024 octets, goes as a literal (`{n}`, then the value after the server's `+` continuation; a tagged NO instead ends the command there). Mailbox names are text (`"Entwürfe"`) and go in modified UTF-7 (`Entw&APw-rfe`, RFC 3501 §5.1.3; `imap-utf7-encode` / `imap-utf7-decode`), or as UTF-8 quoted strings once `(imap-enable c "UTF8=ACCEPT")` succeeds. `imap-search` takes search-key syntax as a string (`"FROM alice UNSEEN"`, 7-bit) or a list whose strings are quoted for you (`'(:from "Zoe Smith" :subject "Grüße")`, non-ASCII as literals under `CHARSET UTF-8`). On a stream, literal sizes count UTF-8 octets (a Latin-1 stream gets UTF-8 octets one per character), and response literals are read by size, so a body line never passes for the tagged reply.
 
 ```lisp
 (let ((c (stack-mail:make-imap-client
@@ -80,7 +82,7 @@ IMAP (`imap-client`): `imap-connect` `imap-login` `imap-select` `imap-fetch` `im
 
 ## Tests
 
-`cl-repo test --system mail-protocol`. The SMTP tests in `tests/compose-send-test.lisp` run against Mailpit (AUTH on 11026, STARTTLS on 11027, implicit TLS on 11028, a test CA in `MAIL_SMTP_TEST_CA`) and skip without it; the file header has the `docker run` lines. `live-display-name-send` and `live-non-ascii-send` use a plain Mailpit (`MAIL_SMTP_TEST_PLAIN_PORT`, default 11025). Everything else needs no server: capture servers on an ephemeral port record the wire.
+`cl-repo test --system mail-protocol`. The SMTP tests in `tests/compose-send-test.lisp` run against Mailpit (AUTH on 11026, STARTTLS on 11027, implicit TLS on 11028, a test CA in `MAIL_SMTP_TEST_CA`) and skip without it; the file header has the `docker run` lines. `live-display-name-send` and `live-non-ascii-send` use a plain Mailpit (`MAIL_SMTP_TEST_PLAIN_PORT`, default 11025). The IMAP live tests in `tests/imap-live-test.lisp` run against GreenMail (`MAIL_IMAP_TEST_PORT`, default 23143; `MAIL_IMAP_TEST_SMTP_PORT`, default 23025) and skip without it; the file header has the `docker run` line. Everything else needs no server: capture servers on an ephemeral port record the wire.
 
 ## License
 

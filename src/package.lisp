@@ -64,6 +64,18 @@
            #:mail-address-error-address
            #:parse-address
            #:address-mailboxes
-           #:envelope-sender))
+           #:envelope-sender
+           #:imap-argument-error
+           #:imap-argument-error-argument
+           #:imap-raw
+           #:imap-raw-p
+           #:imap-raw-text
+           #:imap-command
+           #:imap-capability
+           #:imap-enable
+           #:imap-client-capabilities
+           #:imap-client-utf8-accept
+           #:imap-utf7-encode
+           #:imap-utf7-decode))
 
 (in-package #:mail-protocol)

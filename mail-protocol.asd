@@ -1,5 +1,5 @@
 (defsystem "mail-protocol"
-  :version "0.3.2"
+  :version "0.3.3"
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"
@@ -38,7 +38,8 @@
                (:file "round4-fixes-test")
                (:file "issue-11-test")
                (:file "issue-11-break-3-test")
-               (:file "imap-injection-test"))
+               (:file "imap-injection-test")
+               (:file "imap-live-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

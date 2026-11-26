@@ -160,7 +160,7 @@ io-fn. A segment ending in {n} gets a + continuation, the rest a tagged OK."
     (imap-search client (list :subject (%u "Gr~C~Ce" #xFC #xDF)))
     (ok (equal (list "A0001 SEARCH FROM alice UNSEEN"
                      "A0002 SEARCH FROM \"Zoe Smith\" SINCE 1-Jan-2026"
-                     "A0003 SEARCH CHARSET UTF-8 SUBJECT {6}"
+                     "A0003 SEARCH CHARSET UTF-8 SUBJECT {7}"
                      (%u "Gr~C~Ce" #xFC #xDF))
                (funcall sent))
         "a string is search-key syntax; a list quotes its strings, 8-bit as a literal")))
