@@ -202,3 +202,105 @@ io-fn. A segment ending in {n} gets a + continuation, the rest a tagged OK."
       (ok (message-p (first got))))
     (ok (string= (format nil "* 2 EXISTS~C" #\Return) (read-line in))
         "reading stops at the tagged line, not at a body line that looks like one")))
+
+;;; Adversarial round (PR #15): a literal announcement at the end of raw
+;;; text, {n} in a tagged reply's text, octet counting on non-UTF-8 streams.
+
+(deftest-parametrize raw-text-cannot-end-in-a-literal-announcement
+    ((label thunk)
+     ("search {5}" (lambda (c) (imap-search c "FROM {5}")))
+     ("search {5+}" (lambda (c) (imap-search c "FROM {5+}")))
+     ("search ~{5}" (lambda (c) (imap-search c "FROM ~{5}")))
+     ("fetch items" (lambda (c) (imap-fetch c "1" :items "BODY[] {3}")))
+     ("raw in a command" (lambda (c) (imap-command c "NOOP" (imap-raw "x {0}")))))
+  (multiple-value-bind (client sent) (%recording-client)
+    (ok (signals (funcall thunk client) 'imap-argument-error) label)
+    (ok (null (funcall sent)) (format nil "~A: nothing written" label))))
+
+(deftest literal-marker-mid-line-or-inside-a-value-is-fine
+  (multiple-value-bind (client sent) (%recording-client)
+    (imap-search client "SUBJECT {x} UNSEEN")
+    (imap-login client "alice" "pw{5}")
+    (ok (equal '("A0001 SEARCH SUBJECT {x} UNSEEN" "A0002 LOGIN alice \"pw{5}\"")
+               (funcall sent)))))
+
+(deftest small-refusals
+  (ok (signals (encode-imap-command "+" "NOOP") 'imap-argument-error) "+ is not a tag char")
+  (ok (signals (encode-imap-command "A1" "X" '(:a . :b)) 'imap-argument-error) "dotted list")
+  (ok (signals (encode-imap-command "A1" "LOGIN" "u" (string (code-char #xD800)))
+        'imap-argument-error)
+      "a lone surrogate has no UTF-8 form"))
+
+(deftest tagged-reply-text-ending-in-braces-is-not-a-literal
+  (let* ((in (make-string-input-stream
+              (format nil "A0001 NO no such mailbox x{5}~C~%* 3 EXISTS~C~%" #\Return #\Return)))
+         (client (make-imap-client :stream (make-two-way-stream in (make-broadcast-stream)))))
+    (setf (imap-client-state client) :authenticated)
+    (let ((parsed (imap-select client "x{5}")))
+      (ok (eq :no (third (find :tagged parsed :key #'first)))))
+    (ok (string= (format nil "* 3 EXISTS~C" #\Return) (read-line in))
+        "the next line is left for the next command")))
+
+#+sbcl
+(defun %file-stream-client (octets external-format)
+  "A client reading OCTETS from a file opened with EXTERNAL-FORMAT."
+  (let ((path (uiop:tmpize-pathname (uiop:merge-pathnames* "imap-wire.bin"
+                                                           (uiop:temporary-directory)))))
+    (with-open-file (o path :direction :output :element-type '(unsigned-byte 8)
+                            :if-exists :supersede)
+      (write-sequence (coerce octets '(vector (unsigned-byte 8))) o))
+    (let ((in (open path :external-format external-format)))
+      (values (make-imap-client :stream (make-two-way-stream in (make-broadcast-stream)))
+              in path))))
+
+#+sbcl
+(defun %ascii-octets (control &rest args)
+  (map 'list #'char-code (apply #'format nil control args)))
+
+(deftest latin-1-stream-counts-octets-and-decodes-the-body
+  #-sbcl (skip "SBCL external-format names")
+  #+sbcl
+  (let* ((body (append (%ascii-octets "Subject: x~C~%Content-Type: text/plain; charset=utf-8~C~%~C~%"
+                                      #\Return #\Return #\Return)
+                       (list #xC3 #xBC #x2D #xC3 #xBC #x20)
+                       (%ascii-octets "end~C~%" #\Return)))
+         (wire (append (%ascii-octets "* 1 FETCH (RFC822 {~D}~C~%" (length body) #\Return)
+                       body
+                       (%ascii-octets ")~C~%A0001 OK done~C~%" #\Return #\Return))))
+    (multiple-value-bind (client in path) (%file-stream-client wire :latin-1)
+      (unwind-protect
+          (progn
+            (setf (imap-client-state client) :selected)
+            (let ((got (imap-fetch client "1")))
+              (ok (and (= 1 (length got)) (message-p (first got))))
+              (ok (search (format nil "~C-~C end" (code-char #xFC) (code-char #xFC))
+                          (message-body (first got)))
+                  "the whole body, decoded as UTF-8")))
+        (close in)
+        (delete-file path)))))
+
+(deftest replacement-or-undecodable-streams-are-refused
+  #-sbcl (skip "SBCL external-format names")
+  #+sbcl
+  (progn
+    (multiple-value-bind (client in path)
+        (%file-stream-client (%ascii-octets "A0001 OK~C~%" #\Return) '(:utf-8 :replacement #\?))
+      (unwind-protect
+          (ok (signals (imap-login client "alice" "pw") 'imap-error)
+              "a replacement character would miscount literal octets")
+        (close in)
+        (delete-file path)))
+    (multiple-value-bind (client in path)
+        (%file-stream-client (append (%ascii-octets "* 1 FETCH (RFC822 {6}~C~%" #\Return)
+                                     (list #xE9 #xE9 #xE9 #xE9 13 10)
+                                     (%ascii-octets "A0001 OK fake~C~%)~C~%A0001 OK done~C~%"
+                                                    #\Return #\Return #\Return))
+                             :utf-8)
+      (unwind-protect
+          (progn
+            (setf (imap-client-state client) :selected)
+            (ok (signals (imap-fetch client "1") 'imap-error)
+                "an undecodable octet is IMAP-ERROR, not a fake tagged line")
+            (ok (eq :disconnected (imap-client-state client))))
+        (close in)
+        (delete-file path)))))

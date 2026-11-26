@@ -61,12 +61,14 @@ then the N octets."
       (length (encoding-protocol:encode string :encoding :utf-8))))
 
 (defun %check-line-safe (value what)
-  "VALUE, unless it holds CR, LF or NUL: then IMAP-ARGUMENT-ERROR. WHAT names
-the argument in the message."
+  "VALUE, unless it holds CR, LF or NUL, or a lone UTF-16 surrogate (no
+UTF-8 or modified UTF-7 form): then IMAP-ARGUMENT-ERROR. WHAT names the
+argument in the message."
   (let ((bad (position-if (lambda (c)
                             (or (char= c #\Return) (char= c #\Newline)
                                 (char= c (code-char 0))))
-                          value)))
+                          value))
+        (surrogate (position-if (lambda (c) (<= #xD800 (char-code c) #xDFFF)) value)))
     (when bad
       (error 'imap-argument-error
              :argument value
@@ -77,6 +79,11 @@ the argument in the message."
                                 (#\Newline "LF")
                                 (t "NUL"))
                               bad)))
+    (when surrogate
+      (error 'imap-argument-error
+             :argument value
+             :message (format nil "the ~A ~S holds a lone surrogate U+~4,'0X at ~D"
+                              what value (char-code (char value surrogate)) surrogate)))
     value))
 
 (defun %astring-atom-p (string)
@@ -143,6 +150,10 @@ parenthesized list."
     ((integer 0) (funcall emit (princ-to-string value)))
     (symbol (funcall emit (%imap-atom value)))
     (cons
+     (unless (null (cdr (last value)))
+       (error 'imap-argument-error
+              :argument value
+              :message (format nil "cannot send the dotted list ~S" value)))
      (funcall emit "(")
      (loop for (x . more) on value
            do (%imap-emit x utf8 emit)
@@ -152,28 +163,46 @@ parenthesized list."
               :argument value
               :message (format nil "cannot send ~S in an IMAP command" value)))))
 
+(defun %announces-literal-p (text)
+  "True when TEXT ends in {n} or {n+} (also ~{n}, literal8): a server
+reading it as a command line would wait for N octets."
+  (let ((end (length text)))
+    (when (and (> end 2) (char= #\} (char text (1- end))))
+      (let* ((stop (if (char= #\+ (char text (- end 2))) (- end 2) (1- end)))
+             (open (position #\{ text :end stop :from-end t)))
+        (and open
+             (< (1+ open) stop)
+             (every (lambda (c) (char<= #\0 c #\9)) (subseq text (1+ open) stop)))))))
+
 (defun %imap-segments (tag verb args utf8)
   "The wire segments of TAG VERB ARGS (no CRLFs). Every segment but the
 last ends in {n}; the next one starts with that literal's text and goes
 only after the server's + continuation. Every argument is checked before
-anything is returned, so a refused command writes nothing."
+anything is returned, so a refused command writes nothing. A command line
+whose own text ends in {n} or {n+} (raw text such as FROM {5}) is refused:
+the server would wait for a literal and take the next command as it."
   (let ((segments '())
         (current (make-string-output-stream))
+        (tail (make-string-output-stream))
         (verb (string-upcase (string verb))))
-    (unless (%astring-atom-p (%check-line-safe tag "tag"))
+    (unless (and (stringp tag)
+                 (%astring-atom-p (%check-line-safe tag "tag"))
+                 (not (find #\+ tag)))
       (error 'imap-argument-error :argument tag
-                                  :message (format nil "the tag ~S is not an atom" tag)))
+                                  :message (format nil "the tag ~S is not an IMAP tag" tag)))
     (unless (every #'%astring-atom-p (uiop:split-string (%check-line-safe verb "command")
                                                         :separator " "))
       (error 'imap-argument-error :argument verb
                                   :message (format nil "the command ~S is not atoms" verb)))
     (flet ((emit (piece)
              (etypecase piece
-               (string (write-string piece current))
+               (string (write-string piece current)
+                       (write-string piece tail))
                (%imap-literal
                 (let ((text (%imap-literal-text piece)))
                   (format current "{~D}" (%octet-length text))
                   (push (get-output-stream-string current) segments)
+                  (get-output-stream-string tail)
                   (write-string text current))))))
       (emit tag)
       (emit " ")
@@ -181,6 +210,12 @@ anything is returned, so a refused command writes nothing."
       (dolist (arg args)
         (emit " ")
         (%imap-emit arg utf8 #'emit))
+      (let ((own (get-output-stream-string tail)))
+        (when (%announces-literal-p own)
+          (error 'imap-argument-error
+                 :argument own
+                 :message (format nil "the command ends in a literal announcement (~S); the server would take the next command as the literal"
+                                  own))))
       (push (get-output-stream-string current) segments)
       (nreverse segments))))
 
@@ -319,10 +354,11 @@ continuation. For a command without a literal, WIRE is its only segment."
                         "")))
          (list :tagged tag (intern status :keyword) text))))))
 
-(defun %extract-fetch-literal (rest)
+(defun %extract-fetch-literal (rest &optional octet-mode)
   "Pull RFC822 / BODY[] literal text after `{n}` if it is inline in REST.
-N counts UTF-8 octets; the text starts after the CRLF (or LF) that ends the
-{n} line."
+N counts octets: UTF-8 octets of the text, or one per character in
+OCTET-MODE (a Latin-1 stream). The text starts after the CRLF (or LF) that
+ends the {n} line."
   (let ((pos (or (search "RFC822 {" rest :test #'char-equal)
                  (search "BODY[] {" rest :test #'char-equal)
                  (search "BODY.PEEK[] {" rest :test #'char-equal))))
@@ -340,7 +376,7 @@ N counts UTF-8 octets; the text starts after the CRLF (or LF) that ends the
               (let ((stop start)
                     (octets 0))
                 (loop while (and (< stop (length rest)) (< octets n))
-                      do (incf octets (%char-octets (char rest stop) nil))
+                      do (incf octets (%char-octets (char rest stop) octet-mode))
                          (incf stop))
                 (subseq rest start stop)))))))))
 
@@ -355,14 +391,31 @@ UTF-8 octets as characters), else its UTF-8 length."
           (t 4))))
 
 (defun %octet-mode-p (stream)
-  "True when STREAM's external format is Latin-1: the client then writes
-UTF-8 octets one per character."
-  (let* ((format (ignore-errors (stream-external-format stream)))
-         (name (if (consp format) (first format) format)))
-    (and (symbolp name)
-         (member (symbol-name name) '("LATIN-1" "LATIN1" "ISO-8859-1" "ISO8859-1")
-                 :test #'string-equal)
-         t)))
+  "True when STREAM's external format is Latin-1: the client then reads and
+writes UTF-8 octets one per character, and literal sizes are exact.
+Otherwise the stream must be strict UTF-8 (or have no external format, as
+a string stream): a replacement character or another charset would make
+the client miscount literal octets, so that is IMAP-ERROR. A two-way
+stream is judged by its two sides."
+  (if (typep stream 'two-way-stream)
+      (let ((in (%octet-mode-p (two-way-stream-input-stream stream)))
+            (out (%octet-mode-p (two-way-stream-output-stream stream))))
+        (or in out))
+      (let* ((format (ignore-errors (stream-external-format stream)))
+             (name (if (consp format) (first format) format))
+             (options (if (consp format) (rest format) nil))
+             (label (and (symbolp name) name (symbol-name name))))
+        (cond
+          ((and label (member label '("LATIN-1" "LATIN1" "ISO-8859-1" "ISO8859-1")
+                              :test #'string-equal))
+           t)
+          ((and (or (null label)
+                    (member label '("DEFAULT" "UTF-8" "UTF8") :test #'string-equal))
+                (not (and (listp options) (getf options :replacement))))
+           nil)
+          (t (error 'imap-error
+                    :message (format nil "IMAP stream external format ~S: use Latin-1 (octets) or strict UTF-8, or literal sizes go wrong"
+                                     format)))))))
 
 (defun %wire-string (string octet-mode)
   (if (or (not octet-mode) (%ascii-p string))
@@ -409,20 +462,23 @@ NIL at end of file."
                (return (or (read-line stream nil nil) ""))))))))))
 
 (defun %read-response-line (stream octet-mode)
-  "One response line from STREAM, any literals in it folded in (so a body
-line is never taken for a tagged reply), or NIL at end of file."
+  "One response line from STREAM, or NIL at end of file. On an untagged
+(`* `) line, literals are folded in, so a body line is never taken for a
+tagged reply. A tagged or + line is resp-text: a {n} at its end is text
+(a server may echo a name), as Python imaplib reads it."
   (let ((tail (read-line stream nil nil)))
     (when tail
-      (with-output-to-string (o)
-        (loop
-          (write-string tail o)
-          (let ((n (%literal-size tail)))
-            (unless n
-              (return))
-            (write-char #\Newline o)
-            (setf tail (%read-literal stream n octet-mode o))
-            (unless tail
-              (return))))))))
+      (let ((untagged (and (>= (length tail) 2) (string= "* " tail :end2 2))))
+        (with-output-to-string (o)
+          (loop
+            (write-string tail o)
+            (let ((n (and untagged (%literal-size tail))))
+              (unless n
+                (return))
+              (write-char #\Newline o)
+              (setf tail (%read-literal stream n octet-mode o))
+              (unless tail
+                (return)))))))))
 
 (defun %continuation-line-p (line)
   (and (plusp (length line)) (char= #\+ (char line 0))))
@@ -436,7 +492,9 @@ line is never taken for a tagged reply), or NIL at end of file."
 (defun %io (client tag segments)
   "Send command SEGMENTS (NIL: read the greeting) and return the response
 lines. Each segment but the last waits for a + continuation; a tagged reply
-instead (the server refused the literal) ends the command there."
+instead (the server refused the literal) ends the command there. A stream
+error (a closed socket, an undecodable octet in strict UTF-8) leaves the
+stream out of step: it is IMAP-ERROR, and the client is :disconnected."
   (let ((fn (imap-client-io-fn client))
         (s (imap-client-stream client)))
     (cond
@@ -455,20 +513,29 @@ instead (the server refused the literal) ends the command there."
          (flet ((read-one ()
                   (or (%read-response-line s octet-mode)
                       (error 'imap-error :tag tag :message "IMAP connection closed"))))
-           (if (null segments)
-               (list (read-one))
-               (let ((all '()))
-                 (loop for (segment . more) on segments
-                       do (write-string (%wire-string segment octet-mode) s)
-                          (write-char #\Return s)
-                          (write-char #\Newline s)
-                          (force-output s)
-                          (loop for line = (read-one)
-                                do (push line all)
-                                until (or (%tagged-line-p line tag)
-                                          (and more (%continuation-line-p line))))
-                       until (%tagged-line-p (first all) tag))
-                 (nreverse all))))))
+           (handler-case
+               (if (null segments)
+                   (list (read-one))
+                   (let ((all '()))
+                     (loop for (segment . more) on segments
+                           do (write-string (%wire-string segment octet-mode) s)
+                              (write-char #\Return s)
+                              (write-char #\Newline s)
+                              (force-output s)
+                              (loop for line = (read-one)
+                                    do (push line all)
+                                    until (or (%tagged-line-p line tag)
+                                              (and more (%continuation-line-p line))))
+                           until (%tagged-line-p (first all) tag))
+                     (nreverse all)))
+             (imap-error (e)
+               (setf (imap-client-state client) :disconnected)
+               (error e))
+             (stream-error (e)
+               (setf (imap-client-state client) :disconnected)
+               (error 'imap-error :tag tag
+                                  :message (format nil "IMAP stream failed; the connection is out of step: ~A"
+                                                   e)))))))
       (t (error 'imap-error :message "imap-client has no stream or io-fn")))))
 
 (defun %ensure-list (x)
@@ -629,17 +696,30 @@ IMAP-ERROR."))
       (imap-command client "FETCH" (%sequence-set sequence)
                     (if (stringp items) (imap-raw items) items))
     (declare (ignore tag))
-    (let ((bodies (loop for p in parsed
-                        when (and (eq (first p) :untagged)
-                                  (eq (second p) :fetch)
-                                  (getf (cddr p) :body))
-                          collect (getf (cddr p) :body))))
+    (let* ((octet-mode (and (null (imap-client-io-fn client))
+                            (imap-client-stream client)
+                            (%octet-mode-p (imap-client-stream client))))
+           (bodies (loop for p in parsed
+                         for body = (and (eq (first p) :untagged)
+                                         (eq (second p) :fetch)
+                                         (if octet-mode
+                                             (%extract-fetch-literal (getf (cddr p) :raw) t)
+                                             (getf (cddr p) :body)))
+                         when body
+                           collect body)))
       (unless bodies
-        (let ((lit (%extract-fetch-literal (format nil "~{~a~%~}" lines))))
+        (let ((lit (%extract-fetch-literal (format nil "~{~a~%~}" lines) octet-mode)))
           (when lit (push lit bodies))))
       (mapcar (lambda (b)
                 (if (plusp (length b))
-                    (handler-case (parse-message b)
+                    (handler-case
+                        ;; Parse the body's octets, so its charset decodes: on a
+                        ;; Latin-1 stream they are its characters, one each;
+                        ;; otherwise the characters' UTF-8.
+                        (parse-message (cond (octet-mode
+                                              (map '(vector (unsigned-byte 8)) #'char-code b))
+                                             ((every (lambda (c) (< (char-code c) 128)) b) b)
+                                             (t (encoding-protocol:encode b :encoding :utf-8))))
                       (mail-parse-error () b))
                     b))
               bodies))))
