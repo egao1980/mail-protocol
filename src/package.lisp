@@ -76,6 +76,9 @@
            #:imap-client-capabilities
            #:imap-client-utf8-accept
            #:imap-utf7-encode
-           #:imap-utf7-decode))
+           #:imap-utf7-decode
+           #:imap-append
+           #:imap-store
+           #:imap-literal))
 
 (in-package #:mail-protocol)

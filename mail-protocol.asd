@@ -1,10 +1,10 @@
 (defsystem "mail-protocol"
-  :version "0.3.3"
+  :version "0.3.4"
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "mime-protocol" "0.3.4") "encoding-protocol" "datetime-protocol"
-               "bordeaux-threads")
+  :depends-on ((:version "mime-protocol" "0.3.4") (:version "encoding-protocol" "0.3.0")
+               "datetime-protocol" "bordeaux-threads")
   :properties (:cl-repo (:ci (:with ("mail-backend-memory" "mail-backend-smtp"))))
   :serial t
   :pathname "src"
@@ -18,7 +18,7 @@
 
 (defsystem "mail-protocol/tests"
   :depends-on ("mail-protocol" "mail-backend-memory" "mail-backend-smtp" "rove"
-               "usocket" "cl-stack-ssl" "datetime-protocol")
+               "usocket" "cl-stack-ssl" "datetime-protocol" "flexi-streams")
   :pathname "tests"
   :serial t
   :components ((:file "package")
@@ -39,7 +39,8 @@
                (:file "issue-11-test")
                (:file "issue-11-break-3-test")
                (:file "imap-injection-test")
-               (:file "imap-live-test"))
+               (:file "imap-live-test")
+               (:file "imap-leftovers-test"))
   :perform (test-op (o c)
-             (unless (symbol-call :rove :run c)
-               (error "tests failed for ~A" (component-name c)))))
+                    (unless (symbol-call :rove :run c)
+                      (error "tests failed for ~A" (component-name c)))))

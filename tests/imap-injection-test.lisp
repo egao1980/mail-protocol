@@ -236,8 +236,9 @@ io-fn. A segment ending in {n} gets a + continuation, the rest a tagged OK."
               (format nil "A0001 NO no such mailbox x{5}~C~%* 3 EXISTS~C~%" #\Return #\Return)))
          (client (make-imap-client :stream (make-two-way-stream in (make-broadcast-stream)))))
     (setf (imap-client-state client) :authenticated)
-    (let ((parsed (imap-select client "x{5}")))
-      (ok (eq :no (third (find :tagged parsed :key #'first)))))
+    (let ((e (handler-case (imap-select client "x{5}") (imap-error (e) e))))
+      (ok (eq :no (imap-error-status e)) "a failed SELECT (#16) is IMAP-ERROR")
+      (ok (search "x{5}" (princ-to-string e))))
     (ok (string= (format nil "* 3 EXISTS~C" #\Return) (read-line in))
         "the next line is left for the next command")))
 
