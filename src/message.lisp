@@ -44,23 +44,29 @@ add header fields (Python: ValueError)."
               ((> (incf run) 998) (return t))))))
 
 (defun %charset-encoding (charset &optional (errorp t))
-  "The encoding-protocol name of MIME CHARSET (\"iso-8859-1\",
-\"windows-1252\"). When it names none: signal MAIL-PARSE-ERROR, or return
+  "The encoding-protocol name of MIME CHARSET (\"iso-8859-1\", \"Shift_JIS\",
+\"windows-31j\", \"iso-2022-jp\"): ENCODING-PROTOCOL:NORMALIZE-ENCODING maps
+IANA names and Python's aliases. When it names no charset (an unknown name,
+or a transfer encoding such as base64), signal MAIL-PARSE-ERROR, or return
 NIL when ERRORP is NIL."
-  (let* ((name (string-downcase charset))
-         (name (if (and (> (length name) 8) (string= "windows-" name :end2 8))
-                   (concatenate 'string "cp" (subseq name 8))
-                   name))
-         (keyword (find-symbol (string-upcase name) :keyword))
-         (encoding (and keyword (encoding-protocol:normalize-encoding keyword))))
-    (cond
-     ((and encoding
-           (not (member encoding '(:base64 :base64url :base32 :base32hex :base16
-                                   :quoted-printable :rle))))
-      encoding)
-     (errorp
-      (error 'mail-parse-error :message (format nil "unknown charset ~S" charset)))
-     (t nil))))
+  (multiple-value-bind (encoding system) (encoding-protocol:normalize-encoding charset)
+    (flet ((unknown (&optional reason)
+             (if errorp
+                 (error 'mail-parse-error
+                        :message (format nil "unknown charset ~S~@[: ~A~]~@[ (the ASDF system ~A defines it)~]"
+                                         charset reason system))
+                 (return-from %charset-encoding nil))))
+      (when (member encoding '(:base64 :base64url :base32 :base32hex :base16
+                               :quoted-printable :rle))
+        (unknown "a transfer encoding"))
+      ;; normalize-encoding names unknown charsets too; decoding nothing
+      ;; asks encoding-protocol whether it can decode this one.
+      (handler-case
+          (encoding-protocol:decode (make-array 0 :element-type '(unsigned-byte 8))
+                                    :encoding encoding)
+        (encoding-protocol:encoding-unknown-encoding (e)
+          (unknown (encoding-protocol:encoding-error-message e))))
+      encoding)))
 
 (defun %check-token (value what)
   "VALUE, unless it is not an RFC 2045 token: then signal MAIL-PARSE-ERROR
