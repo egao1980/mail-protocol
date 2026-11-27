@@ -10,7 +10,12 @@
    (tls :initarg :tls :accessor smtp-tls :initform nil)
    (tls-verify :initarg :tls-verify :accessor smtp-tls-verify :initform :required)
    (connect-timeout :initarg :connect-timeout :accessor smtp-connect-timeout
-                    :initform 30))
+                    :initform 30)
+   (read-timeout :initarg :read-timeout :accessor smtp-read-timeout :initform 600
+                 :documentation "Seconds to wait for each server reply (NIL: no
+limit). 600, the longest of RFC 5321 4.5.3.2's client timeouts (the reply to
+the end of DATA), so a slow server that has taken the message is not given
+up on and sent the message again."))
   (:documentation
    "SMTP submission (smtplib-shaped). One connection per BACKEND-SEND.
 TLS is cl+ssl through cl-stack-ssl: implicit (TLS, port 465) or STARTTLS
@@ -18,18 +23,21 @@ TLS is cl+ssl through cl-stack-ssl: implicit (TLS, port 465) or STARTTLS
 
 (defun make-smtp-backend (&key (host "127.0.0.1") port (ehlo-host "localhost")
                                username password starttls tls (tls-verify :required)
-                               (connect-timeout 30))
+                               (connect-timeout 30) (read-timeout 600))
   "An SMTP backend. PORT defaults to 465 with :TLS (implicit TLS, Python
 SMTP_SSL), else 25. :STARTTLS T upgrades after EHLO and refuses to go on
 in the clear when the server does not offer it. :USERNAME / :PASSWORD
-authenticate (AUTH PLAIN, else LOGIN). TLS-VERIFY is cl+ssl's :VERIFY."
+authenticate (AUTH PLAIN, else LOGIN). TLS-VERIFY is cl+ssl's :VERIFY.
+CONNECT-TIMEOUT bounds the connect, READ-TIMEOUT (seconds, NIL for none)
+the wait for each reply: a server that stops answering is MAIL-SEND-ERROR."
   (when (and tls starttls)
     (error 'mail-send-error :message ":tls and :starttls are exclusive"))
   (make-instance 'smtp-backend :host host :port (or port (if tls 465 25))
                                :ehlo-host ehlo-host
                                :username username :password password
                                :starttls starttls :tls tls :tls-verify tls-verify
-                               :connect-timeout connect-timeout))
+                               :connect-timeout connect-timeout
+                               :read-timeout read-timeout))
 
 (defun use-smtp-backend (&rest keys)
   (setf *mail-backend* (apply #'make-smtp-backend keys)))
@@ -71,7 +79,8 @@ being dropped, so its own transport errors are of no further use."
   "Send MESSAGE over one SMTP connection. The envelope is the addr-specs of
 ENVELOPE-SENDER and ENVELOPE-RECIPIENTS (smtplib's send_message), worked
 out before connecting: an address that does not parse signals
-MAIL-ADDRESS-ERROR and nothing is sent."
+MAIL-ADDRESS-ERROR and nothing is sent. Each reply is waited for at most
+READ-TIMEOUT seconds."
   (unless (message-p message)
     (error 'mail-send-error :message "send expects a message"))
   (let ((from (envelope-sender message))
@@ -85,6 +94,7 @@ MAIL-ADDRESS-ERROR and nothing is sent."
                     (usocket:socket-connect (smtp-host backend) (smtp-port backend)
                                             :element-type '(unsigned-byte 8)
                                             :timeout (smtp-connect-timeout backend))))
+          (read-timeout (smtp-read-timeout backend))
           (streams '()))
       (flet ((text (binary)
                (let ((s (%text-stream binary)))
@@ -92,6 +102,11 @@ MAIL-ADDRESS-ERROR and nothing is sent."
                  s)))
         (unwind-protect
             (%with-transport-errors (backend)
+              (when read-timeout
+                ;; Where usocket can (SBCL: the stream's own timeout, which
+                ;; :TIMEOUT above set to the connect timeout), reads mid-reply
+                ;; get the same limit.
+                (setf (usocket:socket-option socket :receive-timeout) read-timeout))
               (let* ((raw (usocket:socket-stream socket))
                      (stream (text (if (smtp-tls backend)
                                        (%tls-stream backend raw)
@@ -103,6 +118,12 @@ MAIL-ADDRESS-ERROR and nothing is sent."
                                :ehlo-host (smtp-ehlo-host backend)
                                :username (smtp-username backend)
                                :password (slot-value backend 'password)
+                               :await-reply (and read-timeout
+                                                 (lambda (in)
+                                                   (or (listen in)
+                                                       (usocket:wait-for-input
+                                                        socket :timeout read-timeout
+                                                        :ready-only t))))
                                :starttls (and (smtp-starttls backend)
                                               (lambda ()
                                                 (let ((tls (text (%tls-stream backend raw))))

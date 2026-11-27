@@ -299,5 +299,8 @@
   (ok (search "@example.com>" (message-id (make-message :from "Ann <ann@example.com>"))))
   (ok (search "@localhost>"
               (message-id (make-message :from (format nil "Ann <ann@ex~Cmple.com>" (code-char #xE4))))))
-  (ok (search "@localhost>" (message-id (make-message :from "not an address"))))
+  (ok (search "@localhost>" (message-id (make-message :from "postmaster")))
+      "a From with no domain")
+  (ok (signals (make-message :from "not an address") 'mail-address-error)
+      "#13: an address that does not parse is refused when the message is made")
   (ok (search "@[192.0.2.1]>" (message-id (make-message :from "a@[192.0.2.1]")))))
