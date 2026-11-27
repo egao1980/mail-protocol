@@ -122,9 +122,69 @@ answers. → (values port thread)."
            (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
       (bt2:join-thread thread)
       (ok (typep err 'mail-send-error) (format nil "a silent server is MAIL-SEND-ERROR (~A)" err))
-      (ok (< seconds 10) (format nil "after the read timeout, not forever (~,1Fs)" seconds))
+      (ok (< 0.9 seconds 10) (format nil "after the read timeout, not before it and not forever (~,1Fs)"
+                                     seconds))
       (ok (and err (search "EHLO" (princ-to-string err)))
           "the error says which reply did not come"))))
+
+(defun %slow-smtp-server (delay)
+  "A one-connection SMTP server that answers every command with success,
+each reply after DELAY seconds. → (values port thread)."
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
+                                                        :element-type '(unsigned-byte 8)))
+         (port (usocket:get-local-port listener)))
+    (flet ((serve ()
+             (unwind-protect
+                 (when (usocket:wait-for-input listener :timeout 5 :ready-only t)
+                   (let* ((sock (usocket:socket-accept listener))
+                          (s (usocket:socket-stream sock)))
+                     (flet ((reply (text)
+                              (sleep delay)
+                              (write-sequence (map '(vector (unsigned-byte 8)) #'char-code
+                                                   (%crlf-text text ""))
+                                              s)
+                              (force-output s))
+                            (read-raw ()
+                              (let ((bytes (loop for b = (read-byte s nil nil)
+                                                 while b collect b until (= b 10))))
+                                (and bytes (string-right-trim '(#\Return #\Newline)
+                                                              (map 'string #'code-char bytes))))))
+                       (unwind-protect
+                           (handler-case
+                               (progn
+                                 (reply "220 slow ESMTP")
+                                 (loop with in-data = nil
+                                       for cmd = (read-raw)
+                                       while cmd
+                                       do (cond
+                                            (in-data (when (string= cmd ".")
+                                                       (setf in-data nil)
+                                                       (reply "250 queued")))
+                                            ((string-equal "DATA" cmd)
+                                             (setf in-data t)
+                                             (reply "354 go ahead"))
+                                            ((string-equal "QUIT" cmd)
+                                             (reply "221 bye")
+                                             (return))
+                                            (t (reply "250 ok")))))
+                             (error () nil))
+                         (usocket:socket-close sock)))))
+               (usocket:socket-close listener))))
+      (values port (bt2:make-thread #'serve :name "smtp-slow")))))
+
+(deftest smtp-slow-replies-within-the-read-timeout
+  (multiple-value-bind (port thread) (%slow-smtp-server 1/2)
+    (let ((err (handler-case
+                   (progn
+                     (backend-send (mail-backend-smtp:make-smtp-backend
+                                    :host "127.0.0.1" :port port
+                                    :connect-timeout 5 :read-timeout 5)
+                                   (make-message :from "s@x.example" :to "r@x.example"
+                                                 :subject "s" :body "b"))
+                     nil)
+                 (error (e) e))))
+      (bt2:join-thread thread)
+      (ok (null err) (format nil "each reply 0.5s late, read timeout 5s: sent (~A)" err)))))
 
 (deftest smtp-dialogue-awaits-each-reply
   (let* ((calls 0)

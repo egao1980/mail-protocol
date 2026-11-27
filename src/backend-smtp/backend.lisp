@@ -75,6 +75,25 @@ being dropped, so its own transport errors are of no further use."
         (usocket:socket-close socket))
     ((or stream-error usocket:socket-error cl+ssl::cl+ssl-error) () nil)))
 
+(defun %reply-waiter (socket seconds)
+  "A SMTP-DIALOGUE :AWAIT-REPLY function: true as soon as the input stream
+has data or SOCKET is readable (end of file included, which the read then
+reports), NIL when SECONDS pass first. usocket:wait-for-input can return
+early with nothing ready (SBCL on Windows), so an early return before the
+deadline looks again rather than giving up."
+  (lambda (in)
+    (let ((deadline (+ (get-internal-real-time)
+                       (round (* seconds internal-time-units-per-second)))))
+      (loop
+        (when (listen in)
+          (return t))
+        (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+          (unless (plusp left)
+            (return nil))
+          (if (usocket:wait-for-input socket :timeout (min left 1) :ready-only t)
+              (return t)
+              (sleep (min 1/20 left))))))))
+
 (defmethod backend-send ((backend smtp-backend) message &key)
   "Send MESSAGE over one SMTP connection. The envelope is the addr-specs of
 ENVELOPE-SENDER and ENVELOPE-RECIPIENTS (smtplib's send_message), worked
@@ -119,11 +138,7 @@ READ-TIMEOUT seconds."
                                :username (smtp-username backend)
                                :password (slot-value backend 'password)
                                :await-reply (and read-timeout
-                                                 (lambda (in)
-                                                   (or (listen in)
-                                                       (usocket:wait-for-input
-                                                        socket :timeout read-timeout
-                                                        :ready-only t))))
+                                                 (%reply-waiter socket read-timeout))
                                :starttls (and (smtp-starttls backend)
                                               (lambda ()
                                                 (let ((tls (text (%tls-stream backend raw))))
