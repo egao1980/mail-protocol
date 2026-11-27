@@ -25,9 +25,19 @@ putcmd refuses it). Non-ASCII goes out as UTF-8 (SMTPUTF8)."
   (%crlf out)
   (finish-output out))
 
-(defun %read-reply (in)
-  "Read one SMTP reply, continuation lines included.
+(defvar *await-reply* nil
+  "NIL, or a function of the input stream, called before each SMTP reply is
+read: true when the reply can be read, NIL when none came within the read
+timeout. SMTP-DIALOGUE binds it from its :AWAIT-REPLY.")
+
+(defun %read-reply (in &optional what)
+  "Read one SMTP reply, continuation lines included. When *AWAIT-REPLY* is
+a function, it is called with IN first; NIL from it (no reply within the
+read timeout) is MAIL-SEND-ERROR naming WHAT.
 → (values code text lines): TEXT is the last line's text, LINES every line's."
+  (when (and *await-reply* (not (funcall *await-reply* in)))
+    (error 'mail-send-error
+           :message (format nil "no ~@[~A ~]reply within the read timeout" what)))
   (let ((lines '())
         (code nil))
     (loop
@@ -49,7 +59,7 @@ putcmd refuses it). Non-ASCII goes out as UTF-8 (SMTPUTF8)."
 (defun %expect (in expected &key (condition 'mail-send-error) what)
   "Read a reply; its code must be EXPECTED (an integer or a list of them),
 else signal CONDITION with the code and text. → (values code text lines)."
-  (multiple-value-bind (code text lines) (%read-reply in)
+  (multiple-value-bind (code text lines) (%read-reply in what)
     (unless (if (listp expected) (member code expected) (= code expected))
       (error condition
              :code code
@@ -158,7 +168,8 @@ mangled."
 
 (defun smtp-dialogue (in out &key from recipients data (ehlo-host "localhost")
                          username password starttls
-                         (auth-mechanisms '("PLAIN" "LOGIN")))
+                         (auth-mechanisms '("PLAIN" "LOGIN"))
+                         await-reply)
   "Drive one SMTP transaction on character streams IN / OUT, one character
 per octet (ISO-8859-1): greeting, EHLO, then STARTTLS when STARTTLS is a
 function (it is called after the server's 220 and returns the new IN and
@@ -166,6 +177,12 @@ OUT, over TLS; EHLO is sent again), then AUTH when USERNAME is given (the
 first of AUTH-MECHANISMS the server offers: PLAIN, LOGIN), then MAIL / RCPT
 / DATA / QUIT. A server that does not offer a requested STARTTLS or AUTH
 signals MAIL-SEND-ERROR / MAIL-AUTH-ERROR rather than sending in the clear.
+
+AWAIT-REPLY, when given, is called with the input stream before each reply
+is read: true when the reply can be read, NIL when none came in time, which
+is MAIL-SEND-ERROR naming the reply (no EHLO reply within the read timeout).
+The SMTP backend passes one that waits on its socket for :READ-TIMEOUT
+seconds.
 
 FROM and each of RECIPIENTS go into MAIL FROM / RCPT TO as their addr-spec
 (PARSE-ADDRESS: \"Ann <ann@ex.com>\" → <ann@ex.com>); one that does not
@@ -183,7 +200,8 @@ that is already gone, is not an error (smtplib ignores it too), so a caller
 never retries a delivered message. → T."
   (unless (and from recipients data)
     (error 'mail-send-error :message "smtp-dialogue needs :from :recipients :data"))
-  (let* ((from (if (member (string-trim '(#\Space #\Tab) from) '("" "<>") :test #'string=)
+  (let* ((*await-reply* await-reply)
+         (from (if (member (string-trim '(#\Space #\Tab) from) '("" "<>") :test #'string=)
                    ""
                    (parse-address from)))
          (recipients (mapcar (lambda (recipient)

@@ -79,25 +79,27 @@ The depth of < and > is the depth outside them."
     (and (> code 32) (/= code 127)
          (not (find c "()<>[]:;@\\,.\"")))))
 
-(defun %address-tokens (address &key blanks)
-  "ADDRESS (one address) as tokens: (:atom . text), (:quoted . content with
-quoted-pairs undone), (:literal . \"[...]\"), or one of the characters
-< > @ . , : ;. Blanks and comments are dropped; with BLANKS each run of
-them is one :BLANK token, so a phrase keeps its spacing (\"J.R.R. Tolkien\").
+(defun %address-lexemes (address)
+  "ADDRESS (one address) as lexemes, in order, each (kind start end value)
+over ADDRESS[START,END): :BLANK (a run of SP / HTAB), :COMMENT (outer
+parentheses included), :QUOTED (VALUE its content, quoted-pairs undone),
+:LITERAL ([...]), :ATOM, or :SPECIAL (VALUE one of < > @ . , : ;).
 Signals MAIL-ADDRESS-ERROR on an unterminated quoted string, comment or
 literal, or a stray character."
-  (let ((tokens '())
+  (let ((lexemes '())
         (i 0)
         (n (length address)))
-    (flet ((blank ()
-             (when (and blanks (not (eq :blank (first tokens))))
-               (push :blank tokens))))
+    (flet ((lexeme (kind start end &optional value)
+             (push (list kind start end value) lexemes)))
       (loop while (< i n)
-            do (let ((c (char address i)))
+            do (let ((c (char address i))
+                     (start i))
                  (cond
                    ((member c '(#\Space #\Tab))
-                    (blank)
-                    (incf i))
+                    (setf i (or (position-if-not (lambda (d) (member d '(#\Space #\Tab)))
+                                                 address :start i)
+                                n))
+                    (lexeme :blank start i))
                    ((char= c #\()
                     (let ((depth 1))
                       (incf i)
@@ -109,7 +111,7 @@ literal, or a stray character."
                                (incf i))
                       (when (plusp depth)
                         (%address-fail address "unterminated comment"))
-                      (blank)))
+                      (lexeme :comment start i)))
                    ((char= c #\")
                     (let ((out (make-string-output-stream)))
                       (incf i)
@@ -129,7 +131,7 @@ literal, or a stray character."
                             (t
                              (write-char d out)
                              (incf i)))))
-                      (push (cons :quoted (get-output-stream-string out)) tokens)))
+                      (lexeme :quoted start i (get-output-stream-string out))))
                    ((char= c #\[)
                     (let ((end (position #\] address :start i)))
                       (unless end
@@ -137,17 +139,38 @@ literal, or a stray character."
                       (when (find-if (lambda (d) (member d '(#\[ #\\ #\Space #\Tab)))
                                      address :start (1+ i) :end end)
                         (%address-fail address "a domain literal holds [, \\ or a blank"))
-                      (push (cons :literal (subseq address i (1+ end))) tokens)
-                      (setf i (1+ end))))
+                      (setf i (1+ end))
+                      (lexeme :literal start i)))
                    ((find c "<>@.,:;")
-                    (push c tokens)
-                    (incf i))
+                    (incf i)
+                    (lexeme :special start i c))
                    ((%atom-char-p c)
-                    (let ((end (or (position-if-not #'%atom-char-p address :start i) n)))
-                      (push (cons :atom (subseq address i end)) tokens)
-                      (setf i end)))
+                    (setf i (or (position-if-not #'%atom-char-p address :start i) n))
+                    (lexeme :atom start i))
                    (t
                     (%address-fail address "stray character U+~4,'0X" (char-code c)))))))
+    (nreverse lexemes)))
+
+(defun %address-tokens (address &key blanks)
+  "ADDRESS (one address) as tokens: (:atom . text), (:quoted . content with
+quoted-pairs undone), (:literal . \"[...]\"), or one of the characters
+< > @ . , : ;. Blanks and comments are dropped; with BLANKS each run of
+blanks is one :BLANK token, so a phrase keeps its spacing (\"J.R.R.
+Tolkien\"), and each comment is a :COMMENT token, which separates words as a
+blank does. Signals MAIL-ADDRESS-ERROR on an unterminated quoted string,
+comment or literal, or a stray character."
+  (let ((tokens '()))
+    (loop for (kind start end value) in (%address-lexemes address)
+          do (case kind
+               (:blank
+                (when (and blanks (not (eq :blank (first tokens))))
+                  (push :blank tokens)))
+               (:comment
+                (when blanks (push :comment tokens)))
+               (:quoted (push (cons :quoted value) tokens))
+               (:literal (push (cons :literal (subseq address start end)) tokens))
+               (:atom (push (cons :atom (subseq address start end)) tokens))
+               (:special (push value tokens))))
     (nreverse tokens)))
 
 (defun %quoted-string (text)
@@ -199,10 +222,12 @@ alone (\"postmaster\") is kept, as smtplib sends it."
 
 (defun %phrase-text (tokens address)
   "The display name of phrase TOKENS (%ADDRESS-TOKENS with :BLANKS): a run
-of atoms and dots as written, a blank or comment inside it one space
-(\"J.R.R. Tolkien\", \"Zoë . Smith\", as email.utils.getaddresses reads
-them), its RFC 2047 encoded-words decoded; a quoted string as written; the
-pieces joined by spaces. NIL when TOKENS hold no word."
+of atoms and dots as written, a blank inside it one space (\"J.R.R.
+Tolkien\", \"Zoë . Smith\", as email.utils.getaddresses reads them), its RFC
+2047 encoded-words decoded; a quoted string as written; the pieces joined
+by spaces. A comment ends a run, as whitespace that separates encoded-words
+(=?utf-8?q?a?= (c) =?utf-8?q?b?= reads as \"a b\", as Python's
+headerregistry reads it). NIL when TOKENS hold no word."
   (let ((parts '())
         (run (make-string-output-stream))
         (in-run nil)
@@ -214,6 +239,9 @@ pieces joined by spaces. NIL when TOKENS hold no word."
       (dolist (token tokens)
         (cond
           ((eq token :blank)
+           (setf blank t))
+          ((eq token :comment)
+           (flush)
            (setf blank t))
           ((or (eql token #\.) (and (consp token) (eq :atom (car token))))
            (when (and in-run blank)
@@ -238,7 +266,7 @@ addr-spec \"\" (\"Mailer Daemon <>\", \"<> (bounce)\"), as getaddresses
 reads it. → (values addr-spec display-name route), ROUTE the obsolete
 route's tokens or NIL."
   (let* ((spaced (%address-tokens (%refuse-line-breaks address) :blanks t))
-         (tokens (remove :blank spaced))
+         (tokens (remove-if (lambda (token) (member token '(:blank :comment))) spaced))
          (lt (position #\< tokens)))
     (if (null lt)
         (values (%addr-spec-text tokens address) nil nil)
@@ -383,79 +411,208 @@ a phrase (quoted where it needs it)."
       (mime-protocol:encode-encoded-words name)
       (%display-phrase name)))
 
+(defun %wire-ctext (text)
+  "TEXT, one comment level's text with quoted-pairs undone, for the wire:
+encoded-words when it needs them, the blanks at its ends kept outside; else
+with ( ) and \\ escaped."
+  (let* ((blank-p (lambda (c) (member c '(#\Space #\Tab))))
+         (start (position-if-not blank-p text))
+         (end (and start (1+ (position-if-not blank-p text :from-end t)))))
+    (cond
+      ((null start) text)
+      ((%needs-encoded-words-p text)
+       (concatenate 'string
+                    (subseq text 0 start)
+                    (mime-protocol:encode-encoded-words (subseq text start end))
+                    (subseq text end)))
+      (t
+       (with-output-to-string (o)
+         (loop for c across text
+               do (when (find c "()\\")
+                    (write-char #\\ o))
+                  (write-char c o)))))))
+
 (defun %wire-comment (comment)
-  "COMMENT's text for the wire: encoded-words when it needs them."
-  (if (%needs-encoded-words-p comment)
-      (mime-protocol:encode-encoded-words comment)
-      comment))
+  "COMMENT's text (between its outer parentheses, as written) for the wire.
+As written when it needs no encoding. Otherwise each nesting level on its
+own: its text, quoted-pairs undone, as encoded-words where it needs them
+(blanks at its ends kept outside them), else with ( ) \\ escaped again; a
+nested comment in its own parentheses. So (c\\(ö) decodes as c(ö, and
+(Zoë (nested \\) ü) x) keeps its nesting (RFC 2047 5 (2))."
+  (if (not (%needs-encoded-words-p comment))
+      comment
+      (with-output-to-string (o)
+        (let ((text (make-string-output-stream))
+              (i 0)
+              (n (length comment)))
+          (flet ((flush-text ()
+                   (write-string (%wire-ctext (get-output-stream-string text)) o)))
+            (loop while (< i n)
+                  do (let ((c (char comment i)))
+                       (cond
+                         ((char= c #\\)
+                          (when (< (1+ i) n)
+                            (write-char (char comment (1+ i)) text))
+                          (incf i 2))
+                         ((char= c #\()
+                          (flush-text)
+                          (let ((depth 1)
+                                (j (1+ i)))
+                            (loop while (and (< j n) (plusp depth))
+                                  do (case (char comment j)
+                                       (#\\ (incf j))
+                                       (#\( (incf depth))
+                                       (#\) (decf depth)))
+                                     (incf j))
+                            (format o "(~A)" (%wire-comment (subseq comment (1+ i) (max (1+ i) (1- j)))))
+                            (setf i j)))
+                         (t
+                          (write-char c text)
+                          (incf i)))))
+            (flush-text))))))
+
+(defun %ends-encoded-p (text)
+  "Does TEXT end in an encoded-word (?=), which wants a blank before a
+following special?"
+  (let ((n (length text)))
+    (and (>= n 2) (string= "?=" text :start2 (- n 2)))))
+
+(defun %lexeme-text (address lexeme)
+  (subseq address (second lexeme) (third lexeme)))
+
+(defun %wire-comment-lexeme (address lexeme)
+  (format nil "(~A)" (%wire-comment (subseq address (1+ (second lexeme)) (1- (third lexeme))))))
+
+(defun %wire-phrase-lexemes (address lexemes)
+  "Phrase LEXEMES of ADDRESS for the wire, comments and blanks in place:
+each run of words between comments (blanks at its ends left out) as
+encoded-words when its display text needs them (%WIRE-PHRASE), else as
+written; an encoded run gets a blank between it and a comment that touches
+it."
+  (let ((pieces '())
+        (segment '()))
+    (flet ((piece (text &optional encoded)
+             (push (cons text encoded) pieces))
+           (blank-p (l) (eq :blank (first l))))
+      (flet ((flush ()
+               (let* ((seg (nreverse segment))
+                      (first (position-if-not #'blank-p seg))
+                      (last (position-if-not #'blank-p seg :from-end t)))
+                 (setf segment '())
+                 (if (null first)
+                     (dolist (l seg) (piece (%lexeme-text address l)))
+                     (let* ((core (subseq address (second (nth first seg)) (third (nth last seg))))
+                            (display (%phrase-text (%address-tokens core :blanks t) address)))
+                       (dolist (l (subseq seg 0 first)) (piece (%lexeme-text address l)))
+                       (if (and display (%needs-encoded-words-p display))
+                           (piece (%wire-phrase display) t)
+                           (piece core))
+                       (dolist (l (subseq seg (1+ last))) (piece (%lexeme-text address l))))))))
+        (dolist (l lexemes)
+          (if (eq :comment (first l))
+              (progn (flush) (piece (%wire-comment-lexeme address l)))
+              (push l segment)))
+        (flush)))
+    (with-output-to-string (o)
+      (loop for (piece . more) on (nreverse pieces)
+            for previous = nil then last
+            for last = piece
+            do (when (and previous
+                          (or (cdr previous) (cdr piece))
+                          (not (find (char (car previous) (1- (length (car previous))))
+                                     '(#\Space #\Tab)))
+                          (not (find (char (car piece) 0) '(#\Space #\Tab))))
+                 (write-char #\Space o))
+               (write-string (car piece) o)))))
+
+(defun %wire-rest-lexemes (address lexemes drop-route)
+  "LEXEMES of ADDRESS after its display name (<addr-spec>, or a bare
+addr-spec) for the wire: as written, each comment as %WIRE-COMMENT writes
+it. DROP-ROUTE: leave out an obsolete route (<@a,@b:...>) up to its colon."
+  (let* ((skip-from (and drop-route
+                         (position-if (lambda (l) (and (eq :special (first l)) (eql #\@ (fourth l))))
+                                      lexemes)))
+         (skip-to (and skip-from
+                       (position-if (lambda (l) (and (eq :special (first l)) (eql #\: (fourth l))))
+                                    lexemes :start skip-from))))
+    (with-output-to-string (o)
+      (loop for l in lexemes
+            for i from 0
+            unless (and skip-to (<= skip-from i skip-to))
+              do (write-string (if (eq :comment (first l))
+                                   (%wire-comment-lexeme address l)
+                                   (%lexeme-text address l))
+                               o)))))
 
 (defun %wire-mailbox (address)
-  "Mailbox ADDRESS for the wire: display-name <addr-spec> (comments), or
-addr-spec (comments) without a display name, the display name and comments
-as encoded-words where they need them (RFC 2047 5 (2), (3)). A non-ASCII
-obsolete route is dropped: it has no encoded form, and a reader ignores it
-(RFC 5322 4.4). ADDRESS comes back as written when none of them needs it."
+  "Mailbox ADDRESS for the wire, with its comments and blanks where they
+were (as Python's EmailMessage writes it): each run of display-name words
+between comments as encoded-words when it needs them, each comment as
+%WIRE-COMMENT writes it, the rest as written. A non-ASCII obsolete route is
+dropped: it has no encoded form, and a reader ignores it (RFC 5322 4.4).
+ADDRESS comes back as written when nothing needs encoding."
   (multiple-value-bind (spec name route) (%parse-mailbox address)
-    (let ((comments (%address-comments address)))
+    (declare (ignore spec))
+    (let ((comments (%address-comments address))
+          (ascii-route (every (lambda (token)
+                                (or (characterp token) (%ascii-p (cdr token))))
+                              route)))
       (if (and (or (null name) (not (%needs-encoded-words-p name)))
                (notany #'%needs-encoded-words-p comments)
-               (every (lambda (token)
-                        (or (characterp token) (%ascii-p (cdr token))))
-                      route))
+               ascii-route)
           address
-          (let ((phrase (and name (plusp (length name)) (%wire-phrase name))))
-            (format nil "~@[~A ~]~:[~A~;<~A>~]~{ (~A)~}"
-                    phrase
-                    (or phrase (zerop (length spec)))
-                    spec
-                    (mapcar #'%wire-comment comments)))))))
+          (let* ((lexemes (%address-lexemes address))
+                 (lt (position-if (lambda (l) (and (eq :special (first l)) (eql #\< (fourth l))))
+                                  lexemes))
+                 (phrase (if lt (%wire-phrase-lexemes address (subseq lexemes 0 lt)) "")))
+            (concatenate 'string
+                         phrase
+                         (if (%ends-encoded-p phrase) " " "")
+                         (%wire-rest-lexemes address (if lt (subseq lexemes lt) lexemes)
+                                             (not ascii-route))))))))
 
 (defun %wire-group (address colon semicolon)
   "Group ADDRESS (its \":\" at COLON, \";\" at SEMICOLON) for the wire: the
-group's display name (empty allowed) and the comments around it, each
-member as %WIRE-ADDRESS writes it, then the comments after the \";\". An
-encoded-word name gets a blank before the \":\" (RFC 2047 5 (3)).
+group's display name (empty allowed) with its comments in place, as
+%WIRE-PHRASE-LEXEMES writes a phrase, each member as %WIRE-ADDRESS writes
+it, then the comments after the \";\" where they were. An encoded-word name
+gets a blank before the \":\" (RFC 2047 5 (3)).
 Signals MAIL-ADDRESS-ERROR for a group ADDRESS-MAILBOXES refuses, such as
 one with an address after its \";\": writing only the group would drop that
 address from To and from the envelope."
   (%address-mailboxes address)
-  (let* ((head (subseq address 0 colon))
-         (name (%phrase-text (%address-tokens head :blanks t) address))
+  (let* ((head (string-right-trim '(#\Space #\Tab)
+                                  (%wire-phrase-lexemes address
+                                                        (%address-lexemes (subseq address 0 colon)))))
          (members (%split-address-list
                    (subseq address (1+ colon) (or semicolon (length address)))))
-         (tail (and semicolon (%address-comments (subseq address (1+ semicolon)))))
-         (parts (append (and name (plusp (length name)) (list (%wire-phrase name)))
-                        (mapcar (lambda (comment) (format nil "(~A)" (%wire-comment comment)))
-                                (%address-comments head))))
-         (last-part (car (last parts))))
-    (format nil "~{~A~^ ~}~:[~; ~]: ~{~A~^, ~};~{ (~A)~}"
-            parts
-            (and last-part (> (length last-part) 1)
-                 (string= "?=" last-part :start2 (- (length last-part) 2)))
+         (tail (if semicolon
+                   (let ((after (subseq address (1+ semicolon))))
+                     (%wire-rest-lexemes after (%address-lexemes after) nil))
+                   "")))
+    (format nil "~A~:[~; ~]: ~{~A~^, ~};~A"
+            head
+            (%ends-encoded-p head)
             (mapcar #'%wire-address members)
-            (mapcar #'%wire-comment tail))))
+            (string-right-trim '(#\Space #\Tab) tail))))
 
 (defun %wire-address (address)
   "ADDRESS for a header field, as Python's EmailMessage writes it: a display
 name (of a mailbox or a group) or a comment that is not ASCII, or holds a
 word too long to fold, becomes RFC 2047 encoded-words (RFC 2047 5 (2),
-(3)); a group's members are written the same way, a non-ASCII obsolete
-route dropped. An ASCII address is kept as written, also when it does not
-parse (the envelope refuses it). A non-ASCII one that does not parse
-signals MAIL-ADDRESS-ERROR: it has no form fit for the header."
-  (flet ((wire ()
-           (multiple-value-bind (colon semicolon) (%group-bounds address)
-             (if colon
-                 (%wire-group address colon semicolon)
-                 (%wire-mailbox address)))))
+(3)), comments and blanks kept in place; a group's members are written the
+same way, a non-ASCII obsolete route dropped. An address that needs none of
+this is kept as written. One rule for every address, ASCII or not: one that
+does not parse signals MAIL-ADDRESS-ERROR, so a message is never made with
+a recipient no reader can find (Python's getaddresses reads ('', '') for
+\"Zoe Smith\" or \"Zoe <z@x.example>;\")."
+  (multiple-value-bind (colon semicolon) (%group-bounds address)
     (cond
-      ((not (%ascii-p address))
-       (wire))
-      ((not (%long-word-p address))
+      ((and (%ascii-p address) (not (%long-word-p address)))
+       (%address-mailboxes address)
        address)
-      (t
-       (handler-case (wire)
-         (mail-address-error () address))))))
+      (colon (%wire-group address colon semicolon))
+      (t (%wire-mailbox address)))))
 
 (defun %display-address (address)
   "ADDRESS for a reader: encoded-words in a mailbox's or a group's display
