@@ -58,10 +58,11 @@ header field or the SMTP command and let the rest pose as another one."))
 anything is written. An atom or quoted string cannot hold CR or LF (RFC 3501
 §4.3, RFC 9051 §4.3): a line break would end the command and the rest would
 reach the server as another tagged command (IMAP command injection). NUL is
-not allowed anywhere. A literal could carry CR LF, but no argument this
-client sends (user, password, mailbox, search key, sequence, items) needs
-one, so CR, LF and NUL are refused outright, as Python's imaplib does
-(\"NUL, CR and LF not allowed in commands\")."))
+not allowed anywhere. CR LF can go only inside a literal, whose size tells
+the server where it ends: an IMAP-LITERAL argument, or the message of
+IMAP-APPEND. Everywhere else (user, password, mailbox, search key,
+sequence, items, flags, dates) CR, LF and NUL are refused outright, as
+Python's imaplib does (\"NUL, CR and LF not allowed in commands\")."))
 
 (defclass mail-backend () ()
   (:documentation "Base class for mail-protocol send backends."))
