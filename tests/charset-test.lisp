@@ -43,3 +43,28 @@
       "the error form names the charset as MAIL-PARSE-ERROR")
   (ok (null (mail-protocol::%charset-encoding "base64" nil))
       "a transfer encoding is no charset"))
+
+;;; egao1980/mail-protocol#21: encoding-protocol (>= 0.5.0) loads a CJK
+;;; charset's system the first time a body needs it, so mail-protocol no
+;;; longer depends on encoding-protocol/cjk. Charset names resolve through
+;;; find-encoding (0.6.0), which never interns an unknown name.
+
+(deftest cjk-charsets-load-on-demand
+  (ok (not (member "encoding-protocol/cjk"
+                   (mapcar (lambda (spec) (if (consp spec) (second spec) spec))
+                           (asdf:system-depends-on (asdf:find-system "mail-protocol")))
+                   :test #'equalp))
+      "mail-protocol does not depend on encoding-protocol/cjk")
+  (ok (equal (%u "~C~C" #x4E2D #x6587)
+             (string-right-trim '(#\Return #\Newline)
+                                (message-body (%body-in-charset "big5" '(#xA4 #xA4 #xA4 #xE5))))))
+  (ok (asdf:component-loaded-p "encoding-protocol/big5")
+      "the big5 body loaded encoding-protocol/big5"))
+
+(deftest an-unknown-charset-name-is-not-interned
+  (let ((charset (format nil "x-no-such-charset-~36R" (random (expt 36 8)))))
+    (ok (equal "plain"
+               (string-right-trim '(#\Return #\Newline)
+                                  (message-body (%body-in-charset charset (map 'list #'char-code "plain"))))))
+    (ok (null (mail-protocol::%charset-encoding charset nil)))
+    (ok (null (find-symbol (string-upcase charset) :keyword)))))

@@ -45,28 +45,39 @@ add header fields (Python: ValueError)."
 
 (defun %charset-encoding (charset &optional (errorp t))
   "The encoding-protocol name of MIME CHARSET (\"iso-8859-1\", \"Shift_JIS\",
-\"windows-31j\", \"iso-2022-jp\"): ENCODING-PROTOCOL:NORMALIZE-ENCODING maps
-IANA names and Python's aliases. When it names no charset (an unknown name,
-or a transfer encoding such as base64), signal MAIL-PARSE-ERROR, or return
-NIL when ERRORP is NIL."
-  (multiple-value-bind (encoding system) (encoding-protocol:normalize-encoding charset)
+\"windows-31j\", \"iso-2022-jp\"): ENCODING-PROTOCOL:FIND-ENCODING maps
+IANA names and Python's aliases, loads an on-demand charset (big5,
+iso-2022-jp, euc-kr, cp949, gb18030) the first time, and never interns an
+unknown name. When it names no charset (an unknown name, a charset whose
+system does not load, or a transfer encoding such as base64), signal
+MAIL-PARSE-ERROR, or return NIL when ERRORP is NIL."
+  (let ((system nil))
     (flet ((unknown (&optional reason)
              (if errorp
                  (error 'mail-parse-error
                         :message (format nil "unknown charset ~S~@[: ~A~]~@[ (the ASDF system ~A defines it)~]"
                                          charset reason system))
                  (return-from %charset-encoding nil))))
-      (when (member encoding '(:base64 :base64url :base32 :base32hex :base16
-                               :quoted-printable :rle))
-        (unknown "a transfer encoding"))
-      ;; normalize-encoding names unknown charsets too; decoding nothing
-      ;; asks encoding-protocol whether it can decode this one.
-      (handler-case
-          (encoding-protocol:decode (make-array 0 :element-type '(unsigned-byte 8))
-                                    :encoding encoding)
-        (encoding-protocol:encoding-unknown-encoding (e)
-          (unknown (encoding-protocol:encoding-error-message e))))
-      encoding)))
+      (let ((encoding (handler-case (multiple-value-bind (encoding unloaded)
+                                        (encoding-protocol:find-encoding charset)
+                                      (setf system unloaded)
+                                      encoding)
+                        (encoding-protocol:encoding-unknown-encoding (e)
+                          (setf system (encoding-protocol:encoding-unknown-encoding-system e))
+                          (unknown (encoding-protocol:encoding-error-message e))))))
+        (unless encoding
+          (unknown))
+        (when (member encoding '(:base64 :base64url :base32 :base32hex :base16
+                                 :quoted-printable :rle))
+          (unknown "a transfer encoding"))
+        ;; Decoding nothing asks encoding-protocol whether it can decode
+        ;; this one (a charset whose system is not loaded cannot).
+        (handler-case
+            (encoding-protocol:decode (make-array 0 :element-type '(unsigned-byte 8))
+                                      :encoding encoding)
+          (encoding-protocol:encoding-unknown-encoding (e)
+            (unknown (encoding-protocol:encoding-error-message e))))
+        encoding))))
 
 (defun %check-token (value what)
   "VALUE, unless it is not an RFC 2045 token: then signal MAIL-PARSE-ERROR

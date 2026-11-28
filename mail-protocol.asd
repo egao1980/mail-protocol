@@ -1,10 +1,10 @@
 (defsystem "mail-protocol"
-  :version "0.3.6"
+  :version "0.3.7"
   :description "Email message + send GFs + IMAP (stack-mail); MIME via mime-protocol"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "mime-protocol" "0.3.4") (:version "encoding-protocol" "0.4.0")
-               "encoding-protocol/cjk" "datetime-protocol" "bordeaux-threads")
+  :depends-on ((:version "mime-protocol" "0.3.5") (:version "encoding-protocol" "0.6.0")
+               "datetime-protocol" "bordeaux-threads")
   :properties (:cl-repo (:ci (:with ("mail-backend-memory" "mail-backend-smtp"))))
   :serial t
   :pathname "src"
