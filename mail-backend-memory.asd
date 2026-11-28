@@ -1,5 +1,5 @@
 (defsystem "mail-backend-memory"
-  :version "0.3.6"
+  :version "0.3.7"
   :description "mail-protocol backend — record sends in memory"
   :author "egao1980"
   :license "MIT"
